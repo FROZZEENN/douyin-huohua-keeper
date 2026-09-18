@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0f1115" />
+
+    <title>火花守护 · 工作台</title>
+    <meta name="description" content="抖音火花自动续期的自托管工作台" />
+
+    <!-- 不希望被搜索引擎收录：这是一个私人的管理界面 -->
+    <meta name="robots" content="noindex, nofollow" />
+
+    <!-- ?v=__BUILD__ 由后端注入构建戳，破掉浏览器/预览面板的旧缓存 -->
+    <link rel="stylesheet" href="/style.css?v=__BUILD__" />
+    <!-- common.js 要在 app.js 之前加载（它俩都不是模块，靠全局函数共享） -->
+    <script src="/common.js?v=__BUILD__"></script>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%A5%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <!--
+      页面骨架由 JS 构建（见 app.js 的 boot()）。
+      这里刻意留空 —— 因为整个界面都依赖「有没有令牌」「今天成了没有」，
+      先渲染静态骨架再替换会比直接构建更闪。
+
+      为了不让用户在 JS 加载前看到纯白页面，放一句最简单的占位。
+    -->
+    <noscript>
+      <div style="max-width: 520px; margin: 80px auto; padding: 24px; font-family: system-ui, sans-serif">
+        <h1 style="font-size: 18px">需要开启 JavaScript</h1>
+        <p style="color: #888; line-height: 1.7">
+          这个工作台是一份原生前端页面，需要 JavaScript 才能工作。<br />
+          如果你的浏览器禁用了 JS，请为本站点开启后刷新。
+        </p>
+      </div>
+    </noscript>
+
+    <!-- pages_tasks.js 必须在 app.js 之前加载：app.js 的 TABS 里 render: renderTasks、
+        以及 renderRuns 里 successStatsCard 都引用它，defer 脚本按文档顺序执行。 -->
+    <script src="/pages_tasks.js?v=__BUILD__" defer></script>
+    <script src="/app.js?v=__BUILD__" defer></script>
+  </body>
+</html>

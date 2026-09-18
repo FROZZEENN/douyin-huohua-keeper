@@ -1,0 +1,13 @@
+{
+  "name": "douyin-huohua-keeper-frontend-lint",
+  "version": "0.0.0",
+  "private": true,
+  "description": "开发期工具：对零构建的原生前端 JS 做静态检查。运行时完全不需要 Node。",
+  "scripts": {
+    "lint:js": "eslint src/douyin_huohua_keeper/workbench/static"
+  },
+  "devDependencies": {
+    "eslint": "^9.15.0",
+    "globals": "^15.12.0"
+  }
+}

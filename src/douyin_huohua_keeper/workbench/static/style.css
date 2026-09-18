@@ -1,0 +1,1193 @@
+/* ==========================================================================
+   douyin-huohua-keeper 工作台样式
+   --------------------------------------------------------------------------
+   设计目标（按优先级）：
+   1. 手机上能用 —— 这是主要使用场景，你先看到推送、再掏出手机处理
+   2. 一眼能看出「今天成了没有」—— 首屏最重要的一件事
+   3. 不依赖任何构建链 —— 原生 CSS，改完刷新就生效
+
+   没有用任何 CSS 框架。理由：需要的组件很少，引一个框架反而要顺着它的
+   命名和优先级走，改起来比从零写还慢。
+   ========================================================================== */
+
+:root {
+  /* 深色是默认。这个界面多半在晚上或手机上被打开，深色更不刺眼 */
+  --bg: #0f1115;
+  --bg-elevated: #171a21;
+  --bg-input: #1d212b;
+  --bg-hover: #222733;
+
+  --border: #262b36;
+  --border-strong: #333a48;
+
+  --text: #e6e9ef;
+  --text-dim: #9aa3b2;
+  --text-faint: #6b7484;
+
+  --accent: #4c8dff;
+  --accent-dim: #2f5fa8;
+
+  /* 状态色。注意：成功用绿色、失败用红色 —— 这是「程序状态」的语义，
+     和 A 股涨红跌绿的行情约定不是一回事，不要混用 */
+  --ok: #3ecf8e;
+  --ok-bg: #12301f;
+  --warn: #e8b339;
+  --warn-bg: #33280f;
+  --err: #f2555a;
+  --err-bg: #351618;
+  --info: #4c8dff;
+
+  /* 火花火焰的橙色渐变 —— 与手机抖音的观感对齐，群发页和收件人页共用 */
+  --fire-1: #ffd86b;
+  --fire-2: #ff9f43;
+  --fire-3: #fe2c55;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --gap: 14px;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f8;
+    --bg-elevated: #ffffff;
+    --bg-input: #f0f1f4;
+    --bg-hover: #e9ebef;
+    --border: #e0e3e9;
+    --border-strong: #cdd2da;
+    --text: #1b1f27;
+    --text-dim: #5b6473;
+    --text-faint: #878f9d;
+    --ok-bg: #e6f7ef;
+    --warn-bg: #fdf4e0;
+    --err-bg: #fdecec;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   布局
+   -------------------------------------------------------------------------- */
+
+.app {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 16px 96px;
+}
+
+/* 手机上底部固定导航会挡住内容，所以底部留出空间（见上面的 padding-bottom） */
+@media (min-width: 720px) {
+  .app {
+    padding-bottom: 32px;
+  }
+}
+
+header.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 0 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--gap);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 10;
+}
+
+header.top h1 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+header.top .version {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+/* --------------------------------------------------------------------------
+   状态横幅 —— 首屏最重要的一块
+   -------------------------------------------------------------------------- */
+
+.banner {
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: var(--gap);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.banner .icon {
+  font-size: 22px;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.banner .body {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner .title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.banner .sub {
+  color: var(--text-dim);
+  font-size: 13.5px;
+}
+
+.banner.ok {
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+  background: var(--ok-bg);
+}
+
+.banner.warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: var(--warn-bg);
+}
+
+.banner.err {
+  border-color: color-mix(in srgb, var(--err) 40%, var(--border));
+  background: var(--err-bg);
+}
+
+/* --------------------------------------------------------------------------
+   卡片
+   -------------------------------------------------------------------------- */
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: var(--gap);
+}
+
+.card > h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.card > h2 .actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* --------------------------------------------------------------------------
+   表单
+   -------------------------------------------------------------------------- */
+
+.field {
+  margin-bottom: 12px;
+}
+
+.field:last-child {
+  margin-bottom: 0;
+}
+
+.field label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+
+.field .hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.row > .field {
+  flex: 1;
+  min-width: 120px;
+}
+
+input[type="text"],
+input[type="number"],
+input[type="time"],
+input[type="password"],
+select,
+textarea {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 9px 11px;
+  font-size: 15px; /* 手机上小于 16px 会触发自动缩放，但 16 在桌面略大 —— 用 15 折中 */
+  font-family: inherit;
+}
+
+textarea {
+  min-height: 72px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 开关 */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch .track {
+  width: 40px;
+  height: 23px;
+  border-radius: 12px;
+  background: var(--border-strong);
+  position: relative;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.switch .track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+
+.switch input:checked + .track {
+  background: var(--accent);
+}
+
+.switch input:checked + .track::after {
+  transform: translateX(17px);
+}
+
+.switch input:focus-visible + .track {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   按钮
+   -------------------------------------------------------------------------- */
+
+button {
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+
+button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, #fff);
+}
+
+button.danger {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 45%, var(--border-strong));
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--err-bg);
+}
+
+button.small {
+  padding: 5px 10px;
+  font-size: 13px;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* --------------------------------------------------------------------------
+   标签 / 徽章
+   -------------------------------------------------------------------------- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.pill.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+  background: var(--ok-bg);
+}
+
+.pill.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+  background: var(--warn-bg);
+}
+
+.pill.err {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+  background: var(--err-bg);
+}
+
+.pill.accent {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+/* --------------------------------------------------------------------------
+   列表
+   -------------------------------------------------------------------------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.list-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.list-item .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.list-item .name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-item .meta {
+  font-size: 12px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-item .tools {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   好友头像 + 火花状态（收件人列表）
+   -------------------------------------------------------------------------- */
+
+.avatar-fallback.sm,
+.friend-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.avatar-fallback.sm {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--fire-1), var(--fire-3));
+  color: #fff;
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.list-item .name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.list-item .name-row .name {
+  min-width: 0;
+}
+
+/* 火焰：橙色渐变，数字用同色渐变裁字 —— 对齐手机抖音的观感 */
+.streak {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.streak svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+.streak .num {
+  font-size: 13px;
+  font-weight: 700;
+  background: linear-gradient(180deg, var(--fire-1) 0%, var(--fire-2) 55%, var(--fire-3) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* 「重燃中 2/3」恢复态：黄底胶囊 */
+.streak.revive .num {
+  background: none;
+  color: #b26b00;
+  background-color: #fff3d6;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.streak.none {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   成功率一览（历史页）
+   -------------------------------------------------------------------------- */
+
+.big-num {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+
+.chart-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 62px;
+  margin-top: 14px;
+}
+
+.chart-bars .bar {
+  flex: 1;
+  min-width: 3px;
+  height: 100%;
+  border-radius: 2px;
+}
+
+.chart-bars .bar.ok {
+  background: var(--ok);
+}
+
+.chart-bars .bar.err {
+  background: var(--err);
+}
+
+/* 没有尝试的那天画一根短疙瘩，一眼能看出「漏了」 */
+.chart-bars .bar.none {
+  height: 16%;
+  background: var(--border-strong);
+}
+
+/* 分页条：一次只展示一页，好友多的时候靠它翻 */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.pager .pager-info {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* --------------------------------------------------------------------------
+   空状态
+   -------------------------------------------------------------------------- */
+
+.empty {
+  text-align: center;
+  padding: 28px 16px;
+  color: var(--text-faint);
+  font-size: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.empty .big {
+  font-size: 30px;
+  margin-bottom: 8px;
+  opacity: 0.55;
+}
+
+/* --------------------------------------------------------------------------
+   键值展示
+   -------------------------------------------------------------------------- */
+
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 7px 16px;
+  font-size: 13.5px;
+}
+
+.kv dt {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.kv dd {
+  margin: 0;
+  color: var(--text);
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* --------------------------------------------------------------------------
+   底部导航（手机上固定）
+   -------------------------------------------------------------------------- */
+
+nav.tabs {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  z-index: 20;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+nav.tabs button {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-faint);
+  padding: 10px 4px 9px;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+nav.tabs button .ti {
+  font-size: 19px;
+  line-height: 1;
+}
+
+nav.tabs button.active {
+  color: var(--accent);
+  background: transparent;
+}
+
+nav.tabs button:hover:not(.active) {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+@media (min-width: 720px) {
+  nav.tabs {
+    position: static;
+    border-top: none;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--gap);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  nav.tabs button {
+    flex-direction: row;
+    gap: 8px;
+    font-size: 13.5px;
+    padding: 11px 8px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   模态（二维码）
+   -------------------------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  z-index: 100;
+  padding: 20px;
+  /* ⚠️ 必须能滚：
+     扫码弹窗里有「登录页实时画面」之后，内容很容易比屏幕高。
+     以前这里没有 overflow，弹窗又比屏幕高时 —— **上下两头都被切掉、
+     滚也滚不动**，用户只能把浏览器缩放调小才能看到下面的输入框（实测反馈）。
+     现在让背景层可滚动，弹窗用 margin:auto 居中（放得下时居中，
+     放不下时可滚动且顶部可达 —— 这是 flex 居中溢出问题的标准解法）。 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.modal {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 22px;
+  max-width: 380px;
+  width: 100%;
+  text-align: center;
+  /* 配合上面：可用空间足够时居中，不够时可滚动 */
+  margin: auto;
+}
+
+.modal h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.modal .sub {
+  color: var(--text-dim);
+  font-size: 13.5px;
+  margin-bottom: 16px;
+}
+
+.modal .qr-box {
+  background: #fff;
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: inline-block;
+  margin-bottom: 14px;
+  min-width: 220px;
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal .qr-box img {
+  display: block;
+  width: 212px;
+  height: 212px;
+  image-rendering: pixelated;
+}
+
+.modal .steps {
+  text-align: left;
+  font-size: 13.5px;
+  color: var(--text-dim);
+  margin: 0 0 16px;
+  padding-left: 20px;
+}
+
+.modal .steps li {
+  margin-bottom: 3px;
+}
+
+/* 展示「登录页操作」时把弹窗放宽 —— 截图要看得清才点得准 */
+.modal.wide {
+  max-width: 820px;
+}
+
+.modal .relay {
+  text-align: left;
+  margin: 4px 0 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-strong);
+}
+
+.modal .relay-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.modal .relay-status {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  min-height: 17px;
+}
+
+.modal .relay-status.ok {
+  color: var(--ok);
+}
+
+.modal .relay-status.err {
+  color: var(--err);
+}
+
+.modal .relay-read {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin: 8px 0 2px;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* 「要填进哪个输入框」—— 抖音登录页上同时有 国家码 / 手机号 / 验证码 三个框，
+   选错了就会「点了没反应」，所以必须让用户能明确指定。 */
+.modal .relay-target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.modal .relay-target {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 截图的滚动容器：图太高时滚动，而不是把图压扁 */
+.modal .relay-shot-wrap {
+  /* min() 双保险：窄屏按视口比例，高屏不超过 340px —— 给下面的操作区腾地方 */
+  max-height: min(38vh, 340px);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+}
+
+/* 操作区「吸底」：截图再高，输入框和按钮也始终看得见。
+   以前它们被顶到屏幕外，用户只能靠缩放浏览器才能点到（实测反馈）。 */
+.modal .relay-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--bg-elevated);
+  padding-bottom: 2px;
+  box-shadow: 0 -10px 14px -10px rgba(0, 0, 0, 0.5);
+}
+
+/* 窄屏（手机）再把四周和截图收紧一点 */
+@media (max-width: 640px) {
+  .modal-backdrop {
+    padding: 8px;
+  }
+
+  .modal,
+  .modal.wide {
+    padding: 14px;
+    max-width: 100%;
+  }
+
+  .modal .relay-shot-wrap {
+    max-height: 30vh;
+  }
+}
+
+/* ⚠️ 这张图**绝对不能**用 object-fit / max-height 去「装」它。
+   一旦图片内容与元素框比例不符（出现留白），而点击坐标是按**元素框**
+   换算的 —— 就会整体偏移，点不到想点的东西（实测踩过：小目标点不中）。
+   width:100% + height:auto 保证「元素框 == 图片内容」，坐标才对得上。 */
+.modal .relay .relay-shot {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  cursor: crosshair;
+}
+
+.modal .relay input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 放大模式：铺满屏幕，尽量看得清（手机上尤其需要） */
+.relay-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.94);
+  display: flex;
+  flex-direction: column;
+}
+
+.relay-zoom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+}
+
+.relay-zoom-bar span {
+  color: #e8e8e8;
+  font-size: 12.5px;
+}
+
+.relay-zoom-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 0 8px 14px;
+}
+
+/* 同上：靠 width:100% + height:auto 保证坐标换算正确，不要加 object-fit */
+.relay-shot-full {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #fff;
+  border-radius: 4px;
+  cursor: crosshair;
+}
+
+/* --------------------------------------------------------------------------
+   提示条
+   -------------------------------------------------------------------------- */
+
+#toaster {
+  position: fixed;
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+}
+
+@media (min-width: 720px) {
+  #toaster {
+    bottom: 24px;
+  }
+}
+
+.toast {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13.5px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  animation: toast-in 0.18s ease-out;
+  pointer-events: auto;
+  word-break: break-word;
+}
+
+.toast.ok {
+  border-left-color: var(--ok);
+}
+
+.toast.err {
+  border-left-color: var(--err);
+}
+
+.toast.warn {
+  border-left-color: var(--warn);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   工具类
+   -------------------------------------------------------------------------- */
+
+.muted {
+  color: var(--text-dim);
+}
+
+.faint {
+  color: var(--text-faint);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.small {
+  font-size: 13px;
+}
+
+.spread {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.spread > * {
+  min-width: 0;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mt {
+  margin-top: 12px;
+}
+
+.mb {
+  margin-bottom: 12px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.spin {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 日志查看 */
+pre.logs {
+  background: #0a0c10;
+  color: #c9d1d9;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+@media (prefers-color-scheme: light) {
+  pre.logs {
+    background: #1b1f27;
+  }
+}
+
+/* 自检结果 */
+.check-item {
+  display: flex;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+}
+
+.check-item:last-child {
+  border-bottom: none;
+}
+
+.check-item .ci {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+}
+
+.check-item .cn {
+  font-weight: 500;
+}
+
+.check-item .cd {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  word-break: break-word;
+}
+
+.check-item .ch {
+  color: var(--text-faint);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+/* 消息池项 */
+.msg-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.msg-item textarea {
+  min-height: 42px;
+  height: 42px;
+}
+
+.msg-item .tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 日历网格 —— 一眼看一个月有没有断 */
+.calendar {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.cal-cell {
+  aspect-ratio: 1;
+  border-radius: 4px;
+  background: var(--bg-input);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-faint);
+  position: relative;
+}
+
+.cal-cell.ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+}
+
+.cal-cell.partial {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+}
+
+.cal-cell.miss {
+  background: var(--err-bg);
+  color: var(--err);
+  border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+}
+
+.cal-cell.today {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

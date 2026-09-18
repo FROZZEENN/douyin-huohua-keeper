@@ -1,0 +1,6 @@
+playwright==1.62.0
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+apscheduler==3.11.3
+python-dotenv==1.2.3
+tzdata==2026.4

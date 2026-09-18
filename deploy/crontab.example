@@ -1,0 +1,58 @@
+# =============================================================================
+# douyin-huohua-keeper —— 只用 cron 的极简部署
+#
+# 适合：不想开常驻进程、不想装 Docker、就想每天跑一次发完就退出。
+#
+# 前提：在 .env 或下面的环境变量里设好
+#   HUOHUA_ENABLE_SCHEDULER=false   关闭内置调度器，避免和 cron 打架
+#   HUOHUA_RUN_ONCE=true            跑完一次任务就退出，不常驻
+#
+# 安装：
+#   crontab -e
+#   把下面需要的行粘进去
+#
+# 查看执行情况：
+#   tail -f /var/log/huohua-keeper.log
+# =========================================================================
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+# 时区很重要：火花按自然日计算
+TZ=Asia/Shanghai
+
+# -----------------------------------------------------------------------------
+# 方案 A：每天 10:30 发一次（推荐）
+# 日志按天分割，超过 30 天的自动清理
+# -----------------------------------------------------------------------------
+30 10 * * * cd /opt/douyin-huohua-keeper && HUOHUA_ENABLE_SCHEDULER=false HUOHUA_RUN_ONCE=true .venv/bin/python -m douyin_huohua_keeper >> /var/log/huohua-keeper.log 2>&1
+
+# -----------------------------------------------------------------------------
+# 方案 B：走 HTTP 接口触发（服务保持常驻，cron 只负责敲门）
+# 好处：能拿到结构化的返回，重试和告警逻辑仍由应用自己管
+# -----------------------------------------------------------------------------
+# 30 10 * * * curl -fsS -X POST -H "X-Huohua-Token: $HUOHUA_TOKEN" http://127.0.0.1:8787/api/runs/trigger >> /var/log/huohua-keeper.log 2>&1
+
+# -----------------------------------------------------------------------------
+# 方案 C：当天失败后补一次
+# 只在「今天的报告里没有成功记录」时才重发，避免重复。
+# 依赖项目自带的 CLI（--check-today 返回码 0 表示今天已成功）
+# -----------------------------------------------------------------------------
+# 0 15 * * * cd /opt/douyin-huohua-keeper && .venv/bin/python -m douyin_huohua_keeper --check-today || (HUOHUA_ENABLE_SCHEDULER=false HUOHUA_RUN_ONCE=true .venv/bin/python -m douyin_huohua_keeper >> /var/log/huohua-keeper.log 2>&1)
+
+# -----------------------------------------------------------------------------
+# 方案 D：每周自查，登录态太久没刷新就提醒你
+# -----------------------------------------------------------------------------
+# 0 9 * * 1 cd /opt/douyin-huohua-keeper && .venv/bin/python scripts/healthcheck.py --quiet >> /var/log/huohua-keeper.log 2>&1
+
+# -----------------------------------------------------------------------------
+# 日志轮转（systemd 之外用 logrotate 也行）
+# 建议在 /etc/logrotate.d/huohua-keeper 里写：
+#   /var/log/huohua-keeper.log {
+#       weekly
+#       rotate 8
+#       compress
+#       missingok
+#       notifempty
+#       copytruncate
+#   }
+# -----------------------------------------------------------------------------

@@ -1,0 +1,102 @@
+# =============================================================================
+# douyin-huohua-keeper — docker compose
+#
+# 用法：
+#   cp .env.example .env && vim .env      # 至少改 HUOHUA_TOKEN
+#   docker compose up -d
+#   docker compose logs -f
+#
+# 只想在局域网里用？把 ports 改成 "127.0.0.1:8787:8787"
+# =============================================================================
+
+services:
+  keeper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: "3.12"
+    image: douyin-huohua-keeper:latest
+    container_name: douyin-huohua-keeper
+
+    # Chromium 需要一块像样的 /dev/shm，默认 64M 会崩
+    shm_size: "1gb"
+
+    environment:
+      # --- 工作台访问 ---
+      HUOHUA_HOST: "0.0.0.0"
+      HUOHUA_PORT: "8787"
+      # 必须改！留空等于把工作台裸奔在公网上
+      HUOHUA_TOKEN: "${HUOHUA_TOKEN:?请在 .env 里设置 HUOHUA_TOKEN}"
+      # 只允许这些 IP 访问，逗号分隔，留空则不限制
+      HUOHUA_ALLOWED_IPS: "${HUOHUA_ALLOWED_IPS:-}"
+
+      # --- 时间与时区 ---
+      # 火花按自然日计算，时区错了发送窗口就会错
+      TZ: "${TZ:-Asia/Shanghai}"
+
+      # --- 浏览器 ---
+      HUOHUA_HEADLESS: "true"
+      HUOHUA_BROWSER_TIMEOUT_MS: "${HUOHUA_BROWSER_TIMEOUT_MS:-60000}"
+      HUOHUA_NAV_TIMEOUT_MS: "${HUOHUA_NAV_TIMEOUT_MS:-45000}"
+      HUOHUA_SLOW_MO_MS: "${HUOHUA_SLOW_MO_MS:-0}"
+
+      # --- 数据目录 ---
+      HUOHUA_DATA_DIR: "/app/data"
+      HUOHUA_LOG_DIR: "/app/logs"
+
+      # --- 告警阈值 ---
+      HUOHUA_WARN_THRESHOLD: "${HUOHUA_WARN_THRESHOLD:-2}"
+      HUOHUA_CRITICAL_THRESHOLD: "${HUOHUA_CRITICAL_THRESHOLD:-3}"
+      HUOHUA_NOTIFY_CHANNELS: "${HUOHUA_NOTIFY_CHANNELS:-}"
+
+      # --- 通知通道凭据（从 .env 透传，未设置时为空字符串）---
+      HUOHUA_BARK_URL: "${HUOHUA_BARK_URL:-}"
+      HUOHUA_SERVERCHAN_KEY: "${HUOHUA_SERVERCHAN_KEY:-}"
+      HUOHUA_DINGTALK_WEBHOOK: "${HUOHUA_DINGTALK_WEBHOOK:-}"
+      HUOHUA_DINGTALK_SECRET: "${HUOHUA_DINGTALK_SECRET:-}"
+      HUOHUA_FEISHU_WEBHOOK: "${HUOHUA_FEISHU_WEBHOOK:-}"
+      HUOHUA_TELEGRAM_BOT_TOKEN: "${HUOHUA_TELEGRAM_BOT_TOKEN:-}"
+      HUOHUA_TELEGRAM_CHAT_ID: "${HUOHUA_TELEGRAM_CHAT_ID:-}"
+      HUOHUA_GENERIC_WEBHOOK: "${HUOHUA_GENERIC_WEBHOOK:-}"
+
+      # --- 调试 ---
+      HUOHUA_LOG_LEVEL: "${HUOHUA_LOG_LEVEL:-INFO}"
+      # 出错时把截图留在 /app/data/runs/<run_id>/ 下，方便排查
+      HUOHUA_CAPTURE_ON_ERROR: "${HUOHUA_CAPTURE_ON_ERROR:-true}"
+
+    volumes:
+      # 配置、登录态、运行历史。备份这个目录 = 备份一切
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    ports:
+      - "${HUOHUA_BIND:-0.0.0.0}:8787:8787"
+
+    restart: unless-stopped
+
+    # 让 Docker 自己判断容器是不是还活着（真挂了才重启，
+    # 而不是因为定时任务在睡觉就被判定为不健康）
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import os,urllib.request,sys; \
+           port=os.environ.get('HUOHUA_PORT','8787'); \
+           tok=os.environ.get('HUOHUA_TOKEN',''); \
+           req=urllib.request.Request(f'http://127.0.0.1:{port}/api/health', \
+               headers={'X-Huohua-Token': tok} if tok else {}); \
+           sys.exit(0 if urllib.request.urlopen(req, timeout=5).status==200 else 1)\""
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 安全性：容器内不需要提权
+    security_opt:
+      - no-new-privileges:true
