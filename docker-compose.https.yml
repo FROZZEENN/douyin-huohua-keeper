@@ -1,0 +1,46 @@
+# =============================================================================
+# douyin-huohua-keeper —— HTTPS 覆盖层（自签证书方案）
+#
+# 作用：在基础 compose 之上，加一个 nginx 容器做 TLS 终止 + 反向代理。
+#   - nginx 对外只发布 443（不做 80 跳转，避开未备案 80 端口拦截）
+#   - keeper 的 8787 设置成只绑宿主回环（.env 里 HUOHUA_BIND=127.0.0.1），公网碰不到
+#   - nginx 通过 compose 内部网络用服务名 keeper:8787 反代
+#
+# 用法（服务器上，项目根目录）：
+#   SERVER_IP=<公网IP> bash deploy/nginx/gen-selfsigned.sh
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+#   # 访问 https://<公网IP>/ ，浏览器告警 →“高级”→“继续前往”
+#
+# 停用 HTTPS 回到裸 HTTP：
+#   docker compose -f docker-compose.yml up -d --build
+#   （并把 .env 里的 HUOHUA_BIND 改回 0.0.0.0）
+# =============================================================================
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: douyin-huohua-nginx
+
+    depends_on:
+      - keeper
+
+    ports:
+      # 只对外开 443；80 不发布，避免“未备案 80 端口”被拦截
+      - "443:443"
+
+    volumes:
+      # 覆盖镜像自带的 :80 默认站点，容器内只监听 443
+      - ./deploy/nginx/selfsigned-container.conf:/etc/nginx/conf.d/default.conf:ro
+      # 自签证书目录（由 gen-selfsigned.sh 生成）
+      - ./deploy/nginx/certs:/etc/nginx/certs:ro
+
+    restart: unless-stopped
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

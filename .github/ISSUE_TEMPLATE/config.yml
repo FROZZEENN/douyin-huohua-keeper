@@ -1,0 +1,13 @@
+# Issue 模板选择页的配置。
+# 目的：在开 Issue 之前，先把「其实文档里已经写了」的那些挡掉。
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 先看故障排查（按症状索引）
+    url: https://github.com/FROZZEENN/douyin-huohua-keeper/blob/main/docs/05-故障排查.md
+    about: 发不出去 / 找不到联系人 / 浏览器崩 / 收不到通知 —— 大部分问题这里直接有答案
+  - name: 🚀 快速上手（含前置条件与国内网络加速）
+    url: https://github.com/FROZZEENN/douyin-huohua-keeper/blob/main/docs/01-快速上手.md
+    about: 装不上依赖、Chromium 下载慢、不知道从哪开始
+  - name: 💬 使用问题与讨论（不一定是 bug）
+    url: https://github.com/FROZZEENN/douyin-huohua-keeper/discussions
+    about: 配置怎么填、某个做法靠不靠谱 —— 这类问题开 Discussion 更合适

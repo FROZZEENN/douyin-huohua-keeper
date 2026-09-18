@@ -1,0 +1,103 @@
+# =============================================================================
+# douyin-huohua-keeper —— systemd 用户/系统服务单元
+#
+# 安装（系统级，需要 root）：
+#   sudo cp deploy/systemd/douyin-huohua-keeper.service /etc/systemd/system/
+#   sudo vim /etc/systemd/system/douyin-huohua-keeper.service   # 改 User / WorkingDirectory
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now douyin-huohua-keeper
+#   sudo systemctl status douyin-huohua-keeper
+#
+# 安装（用户级，不需要 root，适合树莓派自用）：
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/douyin-huohua-keeper.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now douyin-huohua-keeper
+#   loginctl enable-linger $USER      # 让服务在你登出后继续活着
+#
+# 前提：已经创建虚拟环境并装好依赖
+#   cd /opt/douyin-huohua-keeper
+#   python -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#   .venv/bin/playwright install --with-deps chromium chromium-headless-shell
+#   （两个都要：systemd 跑的是无头模式，用的是 chromium-headless-shell）
+# =============================================================================
+
+[Unit]
+Description=douyin-huohua-keeper —— 抖音火花自动续期
+Documentation=https://github.com/FROZZEENN/douyin-huohua-keeper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# -----------------------------------------------------------------------------
+# 改成你实际的用户名和路径
+# -----------------------------------------------------------------------------
+User=keeper
+Group=keeper
+WorkingDirectory=/opt/douyin-huohua-keeper
+EnvironmentFile=/opt/douyin-huohua-keeper/.env
+
+# -----------------------------------------------------------------------------
+# 启动命令
+# HUOHUA_HEADLESS 必须为 true —— systemd 下没有图形环境
+# -----------------------------------------------------------------------------
+Environment=HUOHUA_HEADLESS=true
+Environment=HUOHUA_HOST=127.0.0.1
+Environment=HUOHUA_PORT=8787
+Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/douyin-huohua-keeper/.playwright
+
+ExecStart=/opt/douyin-huohua-keeper/.venv/bin/python -m douyin_huohua_keeper
+
+# -----------------------------------------------------------------------------
+# 重启策略
+# 定时任务在两次触发之间是「闲着的」，这不算失败，所以 Type=simple + on-failure
+# 比 watchdog 式的重启更合适
+# -----------------------------------------------------------------------------
+Restart=on-failure
+RestartSec=15s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# -----------------------------------------------------------------------------
+# 优雅退出
+# 触发一次 SIGTERM 后给 30 秒收尾：关闭浏览器、写完当前报告
+# -----------------------------------------------------------------------------
+KillSignal=SIGTERM
+TimeoutStopSec=30
+KillMode=mixed
+
+# -----------------------------------------------------------------------------
+# 日志
+# -----------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=huohua-keeper
+
+# -----------------------------------------------------------------------------
+# 安全加固
+# 这一层是「能做多少做多少」，不要为了好看而写上会导致启动失败的选项
+# -----------------------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+
+# 数据目录必须可写
+ReadWritePaths=/opt/douyin-huohua-keeper/data /opt/douyin-huohua-keeper/logs
+
+# Chromium 需要较大的共享内存和地址空间，这两项不要乱收
+# （若出现浏览器启动即崩溃，先看是不是这里卡住了）
+# MemoryDenyWriteExecute=true  # 会导致 Chromium 的 JIT 失败，务必保持注释
+# PrivateDevices=true          # 会让 /dev/shm 变小，Chromium 可能崩
+
+[Install]
+WantedBy=multi-user.target

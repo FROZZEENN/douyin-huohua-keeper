@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>扫码登录 · 抖音火花守护</title>
+<style>
+  /* 这一页刻意做成「单用途、大字号、不需要找按钮」——
+     主界面的扫码入口藏在「账号」标签里，用户找不到。
+
+     关于刷新策略（重要，别改回去）：
+     实测抖音登录页**会自己换二维码**（约 60 秒一次）。
+     所以这里只做「重新截图同一个页面」来同步，
+     **绝不重新导航** —— 重新导航会把用户正在扫的那张码当场作废，
+     表现就是「明明扫了却一直登录不上」。 */
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --line: #262b35;
+    --text: #e8eaf0;
+    --muted: #9aa3b2;
+    --accent: #ff2c55;
+    --ok: #35c759;
+    --warn: #ffb020;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --line: #e2e5ea;
+      --text: #1b1f27;
+      --muted: #6b7280;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 28px 32px;
+    max-width: 460px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 10px 40px rgba(0,0,0,.25);
+  }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  .qr-wrap {
+    background: #fff;
+    border-radius: 10px;
+    padding: 12px;
+    width: 260px;
+    height: 260px;
+    margin: 0 auto 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .qr-wrap img { width: 100%; height: 100%; display: block; }
+  .qr-wrap .placeholder { color: #888; font-size: 13px; }
+  .status { font-size: 15px; margin-bottom: 6px; min-height: 24px; font-weight: 600; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--warn); }
+  .note { color: var(--muted); font-size: 12px; margin-bottom: 16px; min-height: 18px; }
+  button {
+    font: inherit;
+    background: var(--accent);
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 20px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); margin-left: 8px; }
+  ol { text-align: left; color: var(--muted); font-size: 13px; margin: 18px 0 0; padding-left: 22px; }
+  ol li { margin: 4px 0; }
+  ol b { color: var(--text); }
+  .hl { color: var(--accent); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>扫码登录抖音</h1>
+  <div class="sub">二维码会自动保持最新，不用赶时间</div>
+
+  <div class="qr-wrap" id="qrWrap">
+    <span class="placeholder">正在启动浏览器…</span>
+  </div>
+
+  <div class="status" id="status">正在获取二维码…</div>
+  <div class="note" id="note"></div>
+
+  <button id="refreshBtn" disabled>重新获取</button>
+  <button class="ghost" id="stopBtn">停止</button>
+
+  <ol>
+    <li>手机打开<b>抖音 App</b></li>
+    <li>点右上角<b>扫一扫</b>，扫描上面的二维码</li>
+    <li>手机上弹出确认框后，<span class="hl">点「确认登录」</span></li>
+  </ol>
+  <div class="note" style="margin-top:10px">扫码后没点确认，是登录不上最常见的原因。</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // 同步周期：只重新截图同一个页面，**不重新导航**。
+  // 抖音约 60 秒自换一次二维码，12 秒同步一次 → 最多滞后 12 秒，足够。
+  var SYNC_MS = 12000;
+  var POLL_MS = 1500;
+
+  var wrap = document.getElementById('qrWrap');
+  var statusEl = document.getElementById('status');
+  var noteEl = document.getElementById('note');
+  var refreshBtn = document.getElementById('refreshBtn');
+  var stopBtn = document.getElementById('stopBtn');
+
+  var pollTimer = null;
+  var syncTimer = null;
+  var done = false;
+  var busy = false;
+  var lastImage = '';
+  var scanSeen = false;
+
+  /* 令牌：优先 URL 上的 ?token=，其次 localStorage（与主站共用同一个 key）。
+     ⚠️ 不带令牌的话，只要设了 HUOHUA_TOKEN，这一页的接口调用全是 401 ——
+     整个专用扫码页会直接不可用（实测踩过）。 */
+  var TOKEN_KEY = 'huohua.token';
+  var LEGACY_TOKEN_KEY = 'huohua_token';
+
+  function resolveToken() {
+    var fromUrl = new URLSearchParams(location.search).get('token');
+    if (fromUrl) {
+      try { localStorage.setItem(TOKEN_KEY, fromUrl); } catch (e) { /* 隐私模式，忽略 */ }
+      return fromUrl;
+    }
+    try {
+      return localStorage.getItem(TOKEN_KEY) || localStorage.getItem(LEGACY_TOKEN_KEY) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function apiFetch(url, options) {
+    var opts = options || {};
+    var headers = Object.assign({}, opts.headers || {});
+    var token = resolveToken();
+    if (token) { headers['X-Huohua-Token'] = token; }
+    opts.headers = headers;
+    return fetch(url, opts);
+  }
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function setNote(text) {
+    noteEl.textContent = text || '';
+  }
+
+  function showQr(dataUrl) {
+    if (dataUrl === lastImage) { return false; }
+    lastImage = dataUrl;
+    wrap.innerHTML = '';
+    var img = document.createElement('img');
+    img.alt = '登录二维码';
+    img.src = dataUrl;
+    wrap.appendChild(img);
+    return true;
+  }
+
+  function clearTimers() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+  }
+
+  // 拉一张二维码。
+  //   forceNew = true  → 重新导航登录页（只在第一次、或页面明显坏了时用）
+  //   forceNew = false → 只重新截图当前页面（同步，**不会作废已扫的码**）
+  function grab(forceNew) {
+    if (busy || done) { return; }
+    busy = true;
+    if (forceNew) {
+      refreshBtn.disabled = true;
+      setStatus('正在启动浏览器…');
+      setNote('首次启动 Chromium 需要几秒');
+      if (!lastImage) {
+        wrap.innerHTML = '<span class="placeholder">正在启动浏览器…</span>';
+      }
+    }
+
+    apiFetch('/api/accounts/qr/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ force_new: !!forceNew })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        busy = false;
+        if (done) { return; }
+
+        if (!j.ok || !j.image) {
+          setStatus('获取二维码失败', 'err');
+          setNote(j.message || j.error || '未知原因');
+          if (!lastImage) {
+            wrap.innerHTML = '<span class="placeholder">获取失败</span>';
+          }
+          refreshBtn.disabled = false;
+          return;
+        }
+
+        var changed = showQr(j.image);
+        refreshBtn.disabled = false;
+
+        if (!scanSeen) {
+          setStatus('等待扫码…');
+          setNote(changed && lastImage ? '二维码已更新' : '');
+        }
+
+        if (!pollTimer) { pollTimer = setInterval(poll, POLL_MS); }
+        if (!syncTimer) { syncTimer = setInterval(function () { grab(false); }, SYNC_MS); }
+      })
+      .catch(function (err) {
+        busy = false;
+        if (done) { return; }
+        setStatus('请求失败', 'err');
+        setNote(String(err));
+        refreshBtn.disabled = false;
+      });
+  }
+
+  function poll() {
+    apiFetch('/api/accounts/qr/poll', { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (done) { return; }
+
+        if (j.state === 'success') {
+          done = true;
+          clearTimers();
+          setStatus('✅ 登录成功，登录态已保存', 'ok');
+          setNote('可以关掉这一页，去工作台了');
+          refreshBtn.disabled = true;
+          stopBtn.disabled = true;
+          return;
+        }
+
+        if (j.state === 'scanned') {
+          // 用户已经扫了，正在手机上确认 —— 此时尤其不能重新导航
+          scanSeen = true;
+          setStatus('已扫描，请在手机上点「确认登录」', 'err');
+          setNote('这一步不做完，电脑这边不会登录');
+          return;
+        }
+
+        if (j.state === 'expired') {
+          setStatus('二维码已失效，正在换新', 'err');
+          setNote('');
+          // 这种情况才需要重新导航
+          grab(true);
+          return;
+        }
+
+        if (j.state === 'idle') {
+          setStatus('扫码会话已结束', 'err');
+          setNote('点「重新获取」重新开始');
+          clearTimers();
+          return;
+        }
+
+        if (!scanSeen) { setStatus('等待扫码…'); }
+      })
+      .catch(function () { /* 单次失败不打断 */ });
+  }
+
+  refreshBtn.addEventListener('click', function () {
+    // 只要会话还在、页面还好着，重新截图就够了，不需要重新导航
+    grab(false);
+  });
+
+  stopBtn.addEventListener('click', function () {
+    done = true;
+    clearTimers();
+    apiFetch('/api/accounts/qr/cancel', { method: 'POST' }).catch(function () {});
+    setStatus('已停止', 'err');
+    setNote('刷新页面可重新开始');
+    refreshBtn.disabled = true;
+    stopBtn.disabled = true;
+  });
+
+  // 首次必须导航一次，把登录页打开
+  grab(true);
+})();
+</script>
+</body>
+</html>

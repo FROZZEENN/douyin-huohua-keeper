@@ -1,0 +1,191 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一次还在跑的构建
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # ===========================================================================
+  # 静态检查 —— 最快，放第一个，失败了后面的就不用等了
+  # ===========================================================================
+  lint:
+    name: 静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: 安装 ruff
+        run: pip install ruff
+
+      - name: ruff check
+        run: ruff check src tests scripts
+
+      - name: ruff format --check
+        run: ruff format --check src tests scripts
+
+  # ===========================================================================
+  # 测试 —— 多版本矩阵，确保 3.11 到 3.13 都能跑
+  # ===========================================================================
+  test:
+    name: 测试 (Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      # 单元测试不需要浏览器，单独跑一遍能快速暴露问题
+      - name: 单元测试
+        run: pytest tests/unit -m unit
+
+      # 集成测试需要浏览器；装 Chromium 在 Linux 上要带系统依赖
+      # 两个都要：无头模式用的是 chromium-headless-shell（与 Dockerfile 保持一致）
+      - name: 安装 Chromium（集成测试用）
+        run: python -m playwright install --with-deps chromium chromium-headless-shell
+
+      # 集成测试目前为空（tests/integration/ 只有 __init__.py）。
+      # 以前这里单独跑 `pytest tests/integration -m integration` ——
+      # 选到 0 个测试时 pytest 以退出码 5 结束，step 必失败、整个 job 变红。
+      # 将来加了带 @pytest.mark.integration 的用例，下面的全量测试会自动带上它们。
+      - name: 全量测试 + 覆盖率
+        run: pytest --cov --cov-report=xml --cov-report=term-missing
+
+      - name: 上传覆盖率报告
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: warn
+
+  # ===========================================================================
+  # 自检脚本 —— 它本身也是一段会被用户直接运行的代码，得确保它能跑
+  # ===========================================================================
+  healthcheck-script:
+    name: 自检脚本可用性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: 跑自检（JSON 模式，缺依赖时报错是预期行为）
+        run: |
+          python scripts/healthcheck.py --json > /tmp/hc.json || true
+          python - <<'PY'
+          import json, pathlib
+          data = json.loads(pathlib.Path("/tmp/hc.json").read_text())
+          assert "checks" in data, "输出里没有 checks 字段"
+          assert len(data["checks"]) >= 10, f"检查项太少：{len(data['checks'])}"
+          names = {c["name"] for c in data["checks"]}
+          for required in ("Python 版本", "Chromium", "数据目录", "时区"):
+              assert required in names, f"缺少检查项：{required}"
+          print(f"自检脚本输出正常，共 {len(data['checks'])} 项检查")
+          PY
+
+  # ===========================================================================
+  # Docker 构建 —— 确保镜像还能建出来
+  # ===========================================================================
+  docker:
+    name: Docker 构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: douyin-huohua-keeper:ci
+          # runner 在境外 —— 必须走官方源；国内镜像在这里反而慢甚至失败。
+          # （Dockerfile 里 apt/pip 的默认值都是国内镜像，见 Dockerfile 的 ARG 说明）
+          build-args: |
+            APT_MIRROR=official
+            PIP_INDEX_URL=https://pypi.org/simple/
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 冒烟测试 —— 镜像能起来且自检脚本不崩
+        run: |
+          docker run --rm \
+            -e HUOHUA_TOKEN=ci-dummy-token-for-smoke-test \
+            -e HUOHUA_HEADLESS=true \
+            douyin-huohua-keeper:ci \
+            python scripts/healthcheck.py --json || true
+
+      - name: 确认没把敏感文件打进镜像
+        run: |
+          set -e
+          # ⚠️ 必须用 --entrypoint 绕开启动脚本：docker-entrypoint.sh 一上来就会
+          #    mkdir 出 /app/data/accounts 这些目录，所以 `test -e /app/data/accounts`
+          #    **永远为真** —— 这个检查曾经因此每次都红（踩过一次，别改回去）。
+          # 正确做法是查「有没有真的敏感**文件**」，而不是目录。
+          docker run --rm --entrypoint sh douyin-huohua-keeper:ci -c '
+            if [ -e /app/.env ] || [ -n "$(ls -A /app/data/accounts 2>/dev/null)" ]; then
+              echo "❌ 镜像里混进了敏感文件"
+              ls -la /app/data /app/data/accounts 2>/dev/null || true
+              exit 1
+            fi
+            echo "✅ 镜像里既没有 .env，也没有登录态文件"
+          '

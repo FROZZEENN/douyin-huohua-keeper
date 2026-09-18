@@ -1,0 +1,79 @@
+# =============================================================================
+# 构建镜像时不要送进去的东西
+#
+# 核心目的有两个：
+#   1. 别把登录态和密钥烤进镜像层 —— 镜像层是可以被拉下来解包的
+#   2. 别让 .git 和测试拖慢构建、撑大体积
+# =============================================================================
+
+# ---- 敏感运行时数据（绝对不能进镜像）----
+data/
+*.state.json
+storage-state.json
+cookie.json
+.env
+.env.*
+!.env.example
+logs/
+artifacts/
+*.log
+
+# ---- Python 缓存与构建产物 ----
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---- Playwright 缓存 ----
+.playwright/
+test-results/
+playwright-report/
+
+# 临时探针文件（healthcheck 的残留）
+.healthcheck*
+
+# ---- 开发与文档 ----
+.git/
+.gitignore
+.gitattributes
+.github/
+tests/
+docs/
+*.md
+!README.md
+
+# ⚠ 不要把 LICENSE 列进来：Dockerfile 第 127 行有
+#   `COPY pyproject.toml README.md LICENSE ./`，一旦被 ignore，
+#   构建会报 `failed to compute cache key: "/LICENSE": not found`（2026-09-17 踩过）
+
+# ---- 部署辅助（运行时用不到）----
+deploy/
+docker-compose*.yml
+!docker-entrypoint.sh
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ---- 编辑器备份 ----
+*~
+*.bak
+*.orig

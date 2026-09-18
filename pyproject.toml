@@ -1,0 +1,144 @@
+[project]
+name = "douyin-huohua-keeper"
+version = "0.1.0"
+description = "Self-hosted Douyin chat streak keeper — web workbench, QR login, tiered alerts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "douyin-huohua-keeper contributors" }]
+keywords = ["douyin", "streak", "automation", "playwright", "self-hosted", "fastapi"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Web Environment",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Home Automation",
+]
+
+dependencies = [
+  "playwright>=1.54,<2",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.32,<1",
+  "apscheduler>=3.10,<4",
+  "python-dotenv>=1.1,<2",
+  "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6",
+  "httpx>=0.28",
+  "ruff>=0.9",
+]
+
+[project.scripts]
+huohua-keeper = "douyin_huohua_keeper.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/FROZZEENN/douyin-huohua-keeper"
+Documentation = "https://github.com/FROZZEENN/douyin-huohua-keeper/tree/main/docs"
+Issues = "https://github.com/FROZZEENN/douyin-huohua-keeper/issues"
+Source = "https://github.com/FROZZEENN/douyin-huohua-keeper"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# 前端资源要跟着包一起走，否则装完了打开是一片白
+[tool.setuptools.package-data]
+douyin_huohua_keeper = ["workbench/static/**/*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+extend-exclude = [".venv", "data", "logs"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes
+  "I",    # isort
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear
+  "SIM",  # flake8-simplify
+  "RUF",  # ruff-specific
+  "BLE",  # flake8-blind-except：禁止裸 except Exception —— 代码里到处都有
+          # `# noqa: BLE001`，就是因为这条规则在把关「吞掉异常必须说明理由」
+]
+ignore = [
+  "E501",  # 行长度交给 formatter
+  "B008",  # FastAPI 依赖注入需要函数调用作默认值
+  # RUF001/002/003 把全角标点（，。「」等）判成「易混淆字符」。
+  # 本项目的注释、docstring 和用户可见文案本来就是中文，
+  # 这三条在这里产出的 2000+ 条告警全是噪音，没有一条值得修。
+  "RUF001",
+  "RUF002",
+  "RUF003",
+  # UP042 想把 `class X(str, Enum)` 改成 `enum.StrEnum`。
+  # 但两者 `str(成员)` 的输出不同：前者是 "RunStatus.SUCCESS"，
+  # 后者是 "success" —— 对 JSON 序列化和前端比较属于**行为变更**，
+  # 不是纯样式问题。在逐处核对序列化逻辑之前，保持现状更安全。
+  "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"scripts/**" = ["T201", "E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["douyin_huohua_keeper"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+  "unit: 单元测试，不需要网络和浏览器",
+  "integration: 集成测试，会启动浏览器或读写临时数据目录",
+  "live: 需要真实抖音账号，默认跳过",
+]
+filterwarnings = [
+  # 第三方库（starlette/fastapi 的 TestClient）会发弃用警告 —— 那不是本项目
+  # 代码的问题，不该让整个测试挂掉。忽略项必须放在 error 项**之后**
+  # （同一条警告命中多条过滤时，靠后的生效）。
+  "error::DeprecationWarning:douyin_huohua_keeper.*",
+  "ignore::DeprecationWarning:starlette.*",
+  "ignore::DeprecationWarning:anyio.*",
+  "ignore::DeprecationWarning:fastapi.*",
+]
+
+[tool.coverage.run]
+source = ["src/douyin_huohua_keeper"]
+omit = [
+  "*/tests/*",
+  "*/__main__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+]
+show_missing = true

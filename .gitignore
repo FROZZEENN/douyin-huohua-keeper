@@ -1,0 +1,68 @@
+# ---- 运行时数据（含账号登录态，绝不可提交）----
+data/
+*.state.json
+storage-state.json
+cookie.json
+
+# ---- 配置（含密钥）----
+# ⚠️ 所有 .env* 一律不提交（.env.server 里是服务器的令牌和 Server酱 Key）。
+#    只放行 .env.example 这个无真实值的模板。
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---- Playwright ----
+# 用了 PLAYWRIGHT_BROWSERS_PATH=./.playwright 的话浏览器会装在这里
+.playwright/
+test-results/
+playwright-report/
+
+# ---- 运行产物 ----
+*.tmp
+*.trace.zip
+
+# ---- 临时工作目录 ----
+# 冒烟测试 / 手工排查时常在这里堆数据。它不是项目的一部分，
+# 而且很可能包含真实收件人和登录态，必须挡在提交之外。
+.tmp_check/
+.tmp/
+tmp/
+
+# ---- 日志与产物 ----
+logs/
+*.log
+artifacts/
+
+# ---- Node（仅开发期：前端 JS 静态检查用，运行时不需要 Node）----
+node_modules/
+npm-debug.log*
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
