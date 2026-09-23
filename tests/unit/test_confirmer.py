@@ -397,3 +397,104 @@ class TestConfirmationFlow:
         )
 
         assert outcome.state in {ConfirmState.FAILED, ConfirmState.UNCERTAIN}
+
+
+class AnchorOnlyPage(FakePage):
+    """只有**锚点判据**能命中的页面替身。
+
+    - 打锚点时回显 nonce（所以锚点是有效的）；
+    - 之后每次都回答「锚点后面多了新节点」；
+    - 消息区行数恒为 0（不增长），会话预览始终不匹配 —— 其余判据全部失效。
+    """
+
+    def evaluate(self, script: str, arg: Any = None) -> Any:
+        if "data-huohua-anchor" in script:
+            if "setAttribute" in script:
+                return arg["nonce"]
+            return "new_after"
+        return 0
+
+
+class TestAnchorSignal:
+    """锚点判据：与消息内容、与消息区总条数都无关。"""
+
+    def test_mark_returns_nonce_when_page_echoes_it(self) -> None:
+        class EchoPage:
+            def evaluate(self, script: str, arg: Any = None) -> Any:
+                assert "setAttribute" in script, "应该走的是打锚点脚本"
+                return arg["nonce"]
+
+        assert confirmer._mark_last_message(EchoPage())
+
+    def test_mark_returns_empty_when_page_cannot_mark(self) -> None:
+        class NoopPage:
+            def evaluate(self, script: str, arg: Any = None) -> Any:
+                return ""
+
+        assert confirmer._mark_last_message(NoopPage()) == ""
+
+    def test_mark_survives_evaluate_raising(self) -> None:
+        """打不上锚点不能把流程搞崩 —— 只是这次少一条判据。"""
+
+        class BoomPage:
+            def evaluate(self, script: str, arg: Any = None) -> Any:
+                raise RuntimeError("boom")
+
+        assert confirmer._mark_last_message(BoomPage()) == ""
+
+    @pytest.mark.parametrize(
+        ("state", "expected"),
+        [("new_after", True), ("still_last", False), ("gone", None), ("", None)],
+    )
+    def test_anchor_state_mapping(self, state: str, expected: bool | None) -> None:
+        class StatePage:
+            def evaluate(self, script: str, arg: Any = None) -> Any:
+                return state
+
+        assert confirmer._anchor_has_new_message(StatePage(), "n1") is expected
+
+    def test_missing_nonce_is_unknown(self) -> None:
+        assert confirmer._anchor_has_new_message(FakePage(), "") is None
+
+    def test_confirms_when_anchor_gains_a_new_message(self, fake_entries) -> None:
+        """**复现并修掉 2026-09-20~22 的误报场景**。
+
+        恒定文案（预览本来就是「1」）+ 会话本来就在列表首位（跳无可跳）
+        + 消息区条数没变（虚拟列表挤掉旧的）—— 三条老判据全灭，
+        只有「锚点之后多了一个节点」还成立。以前这种情况会报「不确定」。
+        """
+        fake_entries((ConversationEntry(name="小明", raw_text="小明", preview="1", index=0),))
+
+        outcome = confirmer.confirm_sent(
+            AnchorOnlyPage(),
+            contact_name="小明",
+            expected_text="1",
+            timeout_ms=3_000,
+            poll_interval=0.01,
+            require_stable=2,
+            baseline=confirmer.ConversationSnapshot(
+                preview="1", index=0, message_count=15, needle_count=1, anchor="nonce123"
+            ),
+        )
+
+        assert outcome.state is ConfirmState.CONFIRMED
+        assert outcome.status is RunStatus.SUCCESS
+        assert "新气泡" in outcome.detail
+
+    def test_anchor_absent_keeps_old_behaviour(self, fake_entries) -> None:
+        """没打上锚点（老快照 / 选择器失配）时，行为与以前一致 —— 不能因此误报成功。"""
+        fake_entries((ConversationEntry(name="小明", raw_text="小明", preview="1", index=0),))
+
+        outcome = confirmer.confirm_sent(
+            AnchorOnlyPage(),
+            contact_name="小明",
+            expected_text="1",
+            timeout_ms=300,
+            poll_interval=0.01,
+            require_stable=2,
+            baseline=confirmer.ConversationSnapshot(
+                preview="1", index=0, message_count=15, needle_count=1, anchor=""
+            ),
+        )
+
+        assert outcome.state is ConfirmState.UNCERTAIN

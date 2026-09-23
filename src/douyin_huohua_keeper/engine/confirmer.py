@@ -27,6 +27,7 @@ from __future__ import annotations
 import enum
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -82,6 +83,13 @@ class ConversationSnapshot:
     message_count: int = -1
     # 消息区里「正好等于要发的内容」的行数（-1 = 没读到）
     needle_count: int = -1
+    # 「发送前最后一条消息」的锚点 nonce（空串 = 没打上）。
+    #
+    # 为什么需要它：其余判据在「恒定文案 + 会话本来就在列表首位 + 消息区是虚拟列表」
+    # 三种情况同时出现时会**全部失效** —— 预览没变、会话没跳位、条数被挤掉，
+    # 于是消息明明发出去了却报「不确定」（2026-09-20~22 实测，每天 1~2 个）。
+    # 锚点判据不看内容也不看条数：只要锚点**之后**多出一个节点，就是真的新增了一条。
+    anchor: str = ""
 
     @property
     def usable(self) -> bool:
@@ -110,6 +118,7 @@ def snapshot_conversation(page: Any, contact_name: str, *, expected_text: str = 
         raw_text=(entry.raw_text if entry else "") or "",
         message_count=_count_messages(page),
         needle_count=_count_message_lines(page, expected_text),
+        anchor=_mark_last_message(page),
     )
 
 
@@ -133,9 +142,12 @@ def confirm_sent(
 
     现在的判据是「预览匹配期望内容」**并且**至少满足一条变化证据：
 
+    - ``anchor_new``：**打锚点的那条消息之后出现了新节点**（2026-09-23 新增，最强）——
+      不看内容、不看条数，恒定文案 + 会话本来就在首位 + 虚拟列表挤节点都影响不到它；
     - ``preview_changed``：预览和发送前不一样了（对内容无关，适用面最广）；
     - ``moved_to_top``：该会话从列表中部跳到了第 1 个（新消息会把会话顶到最前）；
-    - ``message_grew``：会话内的消息条数变多了（与内容无关，最适用于恒定文案）。
+    - ``message_grew``：会话内的消息条数变多了（与内容无关，最适用于恒定文案）；
+    - ``needle_grew``：消息区里「正好是这句话」的行数变多了。
 
     三条都拿不到、但输入框已清空 → ``UNCERTAIN``（**不重试**，避免重复发送）。
     超时且输入框还有内容 → ``FAILED``。
@@ -173,7 +185,13 @@ def confirm_sent(
         if preview:
             last_preview = preview
 
-        # 证据一（最可靠、与预览无关、恒定文案也能用）：
+        # 证据零（最强）：打锚点的那条消息之后，出现了新的节点。
+        #
+        # 不用看内容、也不看消息区总条数 —— 因此「恒定文案 + 会话本来就在列表首位
+        # + 虚拟列表把旧节点挤掉」这三条同时踩上时它依然有效（其余判据会全灭）。
+        anchor_new = _anchor_has_new_message(page, base.anchor) is True
+
+        # 证据一（与预览无关、恒定文案也能用）：
         # 消息区里「正好是这条内容」的行数变多了 → 确实新增了一条气泡。
         needle_now = -1
         if base.needle_count >= 0 or expected_text:
@@ -184,12 +202,17 @@ def confirm_sent(
         preview_ok = bool(preview and expected and _preview_matches(preview, expected))
         preview_changed = preview_ok and _changed_vs_baseline(page, preview, index, base)
 
-        if needle_grew or preview_changed:
+        if anchor_new or needle_grew or preview_changed:
             saw_change = True
             stable_hits += 1
             if stable_hits >= require_stable:
                 elapsed = time.monotonic() - started
-                why = "消息区里新增了这条内容" if needle_grew else "会话列表已更新"
+                if anchor_new:
+                    why = "消息区里出现了新气泡"
+                elif needle_grew:
+                    why = "消息区里新增了这条内容"
+                else:
+                    why = "会话列表已更新"
                 return ConfirmOutcome(
                     status=RunStatus.SUCCESS,
                     state=ConfirmState.CONFIRMED,
@@ -361,6 +384,102 @@ def _count_message_lines(page: Any, text: str) -> int:
         LOGGER.debug("读取消息区失败：%s", exc)
         return -1
     return int(value) if isinstance(value, (int, float)) else -1
+
+
+# -----------------------------------------------------------------------------
+# 锚点判据：发送前给「最后一条消息」做个记号，发送后看它后面有没有多出新节点。
+#
+# 为什么需要它（2026-09-20~22 实测的误报）：
+#   恒定文案的账号下，会同时踩上三个坑，导致**所有**判据集体失效：
+#     ① 预览文本没变（每天发的是同一句）      → 判据「预览变了」失效
+#     ② 会话本来就在列表第 1 位（昨天发过）   → 判据「跳到第 1 位」失效
+#     ③ 消息区是虚拟列表：新增一条同时挤掉一条 → 判据「条数变多」失效
+#   于是消息明明发出去了，却报「结果不确定」。
+#
+# 锚点判据不看内容、也不看总条数：只要在**我们打过记号的这一条之后**出现新节点，
+# 就说明消息区确实多了一条。前提是消息按时间顺序排列（新的在末尾）—— 聊天界面
+# 都是这样；万一不是，这条判据只是不生效（保守），绝不会误报成功。
+# -----------------------------------------------------------------------------
+
+# 收集页面上所有「消息节点」，并找出文档顺序里最后的那一个。
+# 两个脚本共用这段，避免逻辑漂移。
+_MSG_NODES_JS = """
+  const nodes = new Set();
+  for (const s of selectors) {
+    try { document.querySelectorAll(s).forEach((n) => nodes.add(n)); } catch (e) { /* 无效选择器跳过 */ }
+  }
+  if (!nodes.size) return "";
+  let last = null;
+  for (const n of nodes) {
+    if (last === null) { last = n; continue; }
+    if (last.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) last = n;
+  }
+  if (!last) return "";
+"""
+
+_MARK_LAST_MESSAGE_JS = (
+    """(args) => {
+  const { selectors, nonce } = args;
+"""
+    + _MSG_NODES_JS
+    + """  last.setAttribute('data-huohua-anchor', nonce);
+  return nonce;
+}
+"""
+)
+
+_ANCHOR_STATE_JS = (
+    """(args) => {
+  const { selectors, nonce } = args;
+  const anchor = document.querySelector('[data-huohua-anchor="' + nonce + '"]');
+  if (!anchor) return 'gone';
+"""
+    + _MSG_NODES_JS
+    + """  return last === anchor ? 'still_last' : 'new_after';
+}
+"""
+)
+
+
+def _mark_last_message(page: Any) -> str:
+    """给「当前最后一条消息」打锚点，返回 nonce；打不上返回空串。
+
+    打不上不致命 —— 只是这次少一条判据，判定回落到原来的三条（更保守）。
+    """
+    nonce = uuid.uuid4().hex
+    try:
+        got = page.evaluate(
+            _MARK_LAST_MESSAGE_JS,
+            {"selectors": list(sel.MESSAGE_ITEM_CANDIDATES), "nonce": nonce},
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug("给最后一条消息打锚点失败：%s", exc)
+        return ""
+    return nonce if got == nonce else ""
+
+
+def _anchor_has_new_message(page: Any, nonce: str) -> bool | None:
+    """锚点之后是否出现了新消息。
+
+    - ``True``  —— 出现了（**这是真的新增了一条**，与内容、与总条数都无关）
+    - ``False`` —— 锚点还是最后一个（没看到新增）
+    - ``None``  —— 判不了（锚点被虚拟列表挤掉 / 读不到）→ 调用方当作「没有这条判据」
+    """
+    if not nonce:
+        return None
+    try:
+        state = page.evaluate(
+            _ANCHOR_STATE_JS,
+            {"selectors": list(sel.MESSAGE_ITEM_CANDIDATES), "nonce": nonce},
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug("读取消息锚点失败：%s", exc)
+        return None
+    if state == "new_after":
+        return True
+    if state == "still_last":
+        return False
+    return None
 
 
 def _count_messages(page: Any) -> int:

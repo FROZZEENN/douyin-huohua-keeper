@@ -526,7 +526,8 @@ class TestDailyDigest:
         monkeypatch.setattr(notify_pkg, "Dispatcher", FakeDispatcher)
         settings = load_settings()
         jobs_mod._send_daily_digest(settings, _FakeDigestRepo(entry))
-        return captured["alert"]
+        # 按策略静默时不会派发 —— 此时返回 None，由用例断言
+        return captured.get("alert")
 
     def test_digest_reports_failed_day(self, monkeypatch: Any) -> None:
         alert = self._capture_alert(
@@ -538,7 +539,8 @@ class TestDailyDigest:
         assert "没有成功" in alert.title
         assert "立即发送一次" in alert.body
 
-    def test_digest_reports_successful_day(self, monkeypatch: Any) -> None:
+    def test_digest_is_silent_on_a_clean_day(self, monkeypatch: Any) -> None:
+        """一切正常就不打扰 —— 2026-09-23 用户指定的策略。"""
         alert = self._capture_alert(
             monkeypatch,
             {
@@ -549,8 +551,44 @@ class TestDailyDigest:
             },
         )
 
-        assert "已续上" in alert.title
-        assert "小明" in alert.body
+        assert alert is None
+
+    def test_digest_reports_day_with_uncertain(self, monkeypatch: Any) -> None:
+        """成功但有「结果不确定」→ 要推（那种情况需要人去瞄一眼）。"""
+        alert = self._capture_alert(
+            monkeypatch,
+            {
+                "success": True,
+                "attempts": 1,
+                "any_uncertain": True,
+                "last_summary": "成功 13/15，失败 0",
+            },
+        )
+
+        assert alert is not None
+        assert "不确定" in alert.body
+
+    def test_digest_reports_day_with_earlier_failure(self, monkeypatch: Any) -> None:
+        """按天累积：早上成功、下午那次失败过 → 仍要推。"""
+        alert = self._capture_alert(
+            monkeypatch,
+            {
+                "success": True,
+                "attempts": 2,
+                "any_failed": True,
+                "last_summary": "成功 14/15，失败 1",
+            },
+        )
+
+        assert alert is not None
+        assert "失败" in alert.body
+
+    def test_digest_reports_missed_day(self, monkeypatch: Any) -> None:
+        """今天压根没跑（定时任务没执行）→ 这是异常，必须推。"""
+        alert = self._capture_alert(monkeypatch, {"success": False, "attempts": 0})
+
+        assert alert is not None
+        assert "没有运行" in alert.title
 
 
 class _FakeDigestRepo:

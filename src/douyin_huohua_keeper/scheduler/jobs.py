@@ -456,10 +456,33 @@ def _send_daily_digest(settings: Settings, repo: Any) -> None:
     sent_to = list(entry.get("sent_to") or [])
     last = entry.get("last_summary") or "今天没有任何运行记录"
 
+    # 推送策略（用户 2026-09-23 指定）：
+    #
+    #   白天正常跑成功 → **不打扰**（一条消息发出去就够了，不需要再报喜）；
+    #   只有「今天出过问题」才在 23:30 补一条，用来提醒你去处理。
+    #
+    # 用**按天累积**的标记判断，而不是只看最后一次运行：
+    # 早上成功、下午手动那次挂了，也应该收到汇息。
+    problems = []
+    if attempts == 0:
+        problems.append("今天没有任何运行记录")
+    if not ok:
+        problems.append("今天没有一次成功")
+    if entry.get("any_failed"):
+        problems.append("有发送失败")
+    if entry.get("any_uncertain"):
+        problems.append("有结果不确定的发送")
+
+    if not problems:
+        LOGGER.info("每日汇总：今天一切正常（%s），按策略不推送", last)
+        return
+
+    problems_line = "⚠️ 今天有情况：" + "；".join(problems) + "\n\n"
+
     if ok:
-        title = "🌙 今日汇总：火花已续上"
+        title = "🌙 今日汇总：火花已续上（但今天有情况）"
         body = (
-            f"日期：{today_str()}\n"
+            problems_line + f"日期：{today_str()}\n"
             f"今天共运行 {attempts} 次\n"
             f"成功发给：{'、'.join(sent_to) if sent_to else '（未记录具体名单）'}\n"
             f"最近一次：{last}\n\n"
@@ -468,7 +491,7 @@ def _send_daily_digest(settings: Settings, repo: Any) -> None:
     else:
         title = "🌙 今日汇总：今天没有成功发送" if attempts else "🌙 今日汇总：今天没有运行"
         body = (
-            f"日期：{today_str()}\n"
+            problems_line + f"日期：{today_str()}\n"
             f"今天共运行 {attempts} 次，但没有一次成功。\n"
             f"最近一次：{last}\n\n"
             "**建议动作**：打开工作台「首页 → 运行历史」看失败原因，"

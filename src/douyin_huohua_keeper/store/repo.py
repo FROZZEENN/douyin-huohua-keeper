@@ -624,6 +624,14 @@ class Repository:
         entry["last_failed"] = len(report.failed)
         entry["last_uncertain"] = sum(1 for o in report.outcomes if o.status is RunStatus.UNCERTAIN)
 
+        # 按天累积的「今天出过问题吗」。
+        #
+        # ⚠️ 不能只看**最后一次**运行：早上 09:30 正常、下午你手动补发那次挂了，
+        #    同样属于「今天出过问题」。23:30 的汇总推送就是按这两个标记决定发不发的
+        #    （策略见 scheduler/jobs.py 的 _send_daily_digest）。
+        entry["any_failed"] = bool(entry.get("any_failed")) or bool(report.failed)
+        entry["any_uncertain"] = bool(entry.get("any_uncertain")) or bool(entry["last_uncertain"])
+
         days[day_key] = entry
         payload["updated_at"] = now_str()
 
