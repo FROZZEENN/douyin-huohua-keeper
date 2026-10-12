@@ -399,15 +399,16 @@ class TestConfirmationFlow:
         assert outcome.state in {ConfirmState.FAILED, ConfirmState.UNCERTAIN}
 
 
-def _area(lines: int, last: str, fingerprint: str) -> dict[str, Any]:
-    return {"lines": lines, "last": last, "hash": fingerprint}
+def _area(lines: int, head: list[str], fingerprint: str, *, last: str = "爱心蛋糕sama") -> dict[str, Any]:
+    """构造一份消息区读数（字段与 _READ_MESSAGE_AREA_JS 的返回一致）。"""
+    return {"lines": lines, "head": head, "last": last, "hash": fingerprint}
 
 
 class MessageAreaShapePage(FakePage):
     """只让**消息区判据**命中的页面替身。
 
     - 第一次读消息区返回 ``before``（快照基线），之后返回 ``after``；
-    - 其余脚本（needle 行数）一律返回 0，保证 needle 判据不生效；
+    - 其余脚本一律返回 0，保证 needle 判据不生效；
     - 会话列表预览由 ``fake_entries`` 控制，测试里故意让它"本来就等于内容"。
     """
 
@@ -425,17 +426,18 @@ class MessageAreaShapePage(FakePage):
 
 
 class TestMessageAreaSignal:
-    """消息区判据 —— 只用真机验证过的 MessageList 路径。"""
+    """消息区判据 —— 规则来自 2026-10-12 的真机前后对比。"""
 
     def test_reads_area_shape(self) -> None:
         class Page:
             def evaluate(self, script: str, arg: Any = None) -> Any:
-                return _area(30, "你好", "abc")
+                return _area(20, ["刚刚", "1"], "abc")
 
         area = confirmer._read_message_area(Page())
 
         assert area.usable
-        assert (area.lines, area.last, area.fingerprint) == (30, "你好", "abc")
+        assert area.head == ("刚刚", "1")
+        assert (area.lines, area.fingerprint) == (20, "abc")
 
     @pytest.mark.parametrize("raw", [None, "not-a-dict", [], 42])
     def test_unreadable_area_is_not_usable(self, raw: Any) -> None:
@@ -452,38 +454,52 @@ class TestMessageAreaSignal:
 
         assert not confirmer._read_message_area(Page()).usable
 
+    def test_detects_the_real_machine_case(self) -> None:
+        """**照抄 2026-10-12 真机探测到的真实数据**。"""
+        base = confirmer.MessageArea(
+            lines=18,
+            head=("19分钟前", "1", "昨天 09:55"),
+            last="爱心蛋糕sama",
+            fingerprint="before",
+        )
+        now = confirmer.MessageArea(
+            lines=20,
+            head=("刚刚", "1", "19分钟前"),
+            last="爱心蛋糕sama",
+            fingerprint="after",
+        )
+
+        assert confirmer._area_gained_our_message(base, now, "1")
+
     def test_detects_eviction_case(self) -> None:
-        """**复现误报场景**：行数不变（虚拟列表挤掉旧行），但整段文本变了。
-
-        恒定文案下旧实现会在这里判「不确定」—— 判据全灭。
-        """
-        base = confirmer.MessageArea(lines=30, last="1", fingerprint="aaa")
-        now = confirmer.MessageArea(lines=30, last="1", fingerprint="bbb")
+        """虚拟列表挤掉旧行（行数不变），但开头出现了我们的内容、指纹也变了。"""
+        base = confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa")
+        now = confirmer.MessageArea(lines=18, head=("刚刚", "1"), fingerprint="bbb")
 
         assert confirmer._area_gained_our_message(base, now, "1")
 
-    def test_detects_plain_growth(self) -> None:
-        base = confirmer.MessageArea(lines=30, last="旧消息", fingerprint="aaa")
-        now = confirmer.MessageArea(lines=31, last="1", fingerprint="bbb")
-
-        assert confirmer._area_gained_our_message(base, now, "1")
-
-    def test_rejects_when_last_line_is_not_ours(self) -> None:
-        """⚠️ 最关键的安全用例：对方恰好回消息时，绝不能被当成我们发送成功。"""
-        base = confirmer.MessageArea(lines=30, last="旧消息", fingerprint="aaa")
-        now = confirmer.MessageArea(lines=31, last="你怎么不回我", fingerprint="bbb")
+    def test_rejects_when_content_not_near_top(self) -> None:
+        """⚠️ 安全用例：对方回消息把我们的内容挤下去了 → 不能算我们发送成功。"""
+        base = confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa")
+        now = confirmer.MessageArea(lines=19, head=("刚刚", "你怎么不回我", "19分钟前"), fingerprint="bbb")
 
         assert not confirmer._area_gained_our_message(base, now, "1")
 
     def test_rejects_when_nothing_changed(self) -> None:
-        base = confirmer.MessageArea(lines=30, last="1", fingerprint="aaa")
-        now = confirmer.MessageArea(lines=30, last="1", fingerprint="aaa")
+        base = confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa")
+        now = confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa")
+
+        assert not confirmer._area_gained_our_message(base, now, "1")
+
+    def test_rejects_when_lines_shrank(self) -> None:
+        base = confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa")
+        now = confirmer.MessageArea(lines=5, head=("刚刚", "1"), fingerprint="bbb")
 
         assert not confirmer._area_gained_our_message(base, now, "1")
 
     def test_rejects_when_area_unreadable(self) -> None:
-        base = confirmer.MessageArea()  # 没读到
-        now = confirmer.MessageArea(lines=30, last="1", fingerprint="bbb")
+        base = confirmer.MessageArea()
+        now = confirmer.MessageArea(lines=20, head=("刚刚", "1"), fingerprint="bbb")
 
         assert not confirmer._area_gained_our_message(base, now, "1")
 
@@ -492,7 +508,9 @@ class TestMessageAreaSignal:
         fake_entries((ConversationEntry(name="小明", raw_text="小明", preview="1", index=0),))
 
         outcome = confirmer.confirm_sent(
-            MessageAreaShapePage(before=_area(30, "1", "aaa"), after=_area(30, "1", "bbb")),
+            MessageAreaShapePage(
+                before=_area(18, ["19分钟前", "1"], "aaa"), after=_area(20, ["刚刚", "1"], "bbb")
+            ),
             contact_name="小明",
             expected_text="1",
             timeout_ms=3_000,
@@ -503,19 +521,21 @@ class TestMessageAreaSignal:
                 index=0,
                 message_count=15,
                 needle_count=1,
-                area=confirmer.MessageArea(lines=30, last="1", fingerprint="aaa"),
+                area=confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa"),
             ),
         )
 
         assert outcome.state is ConfirmState.CONFIRMED
-        assert "最后一条就是所发内容" in outcome.detail
+        assert "开头出现了所发内容" in outcome.detail
 
     def test_uncertain_detail_reports_available_signals(self, fake_entries) -> None:
         """超时未确认时，说明里要写清「这次有哪些判据可用」—— 可诊断性。"""
         fake_entries((ConversationEntry(name="小明", raw_text="小明", preview="1", index=0),))
 
         outcome = confirmer.confirm_sent(
-            MessageAreaShapePage(before=_area(30, "1", "aaa"), after=_area(30, "1", "aaa")),
+            MessageAreaShapePage(
+                before=_area(18, ["19分钟前", "1"], "aaa"), after=_area(18, ["19分钟前", "1"], "aaa")
+            ),
             contact_name="小明",
             expected_text="1",
             timeout_ms=300,
@@ -526,7 +546,7 @@ class TestMessageAreaSignal:
                 index=0,
                 message_count=15,
                 needle_count=1,
-                area=confirmer.MessageArea(lines=30, last="1", fingerprint="aaa"),
+                area=confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa"),
             ),
         )
 

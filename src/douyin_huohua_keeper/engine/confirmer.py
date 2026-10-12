@@ -77,6 +77,8 @@ class MessageArea:
     """消息区的一次观测（只用于前后对比，绝不看绝对值）。"""
 
     lines: int = -1
+    # 开头几行 —— 真机实测：消息区**倒序**，新消息出现在开头
+    head: tuple[str, ...] = ()
     last: str = ""
     fingerprint: str = ""
 
@@ -226,7 +228,7 @@ def confirm_sent(
             if stable_hits >= require_stable:
                 elapsed = time.monotonic() - started
                 if area_gained:
-                    why = "消息区已更新（最后一条就是所发内容）"
+                    why = "消息区开头出现了所发内容"
                 elif needle_grew:
                     why = "消息区里新增了这条内容"
                 else:
@@ -458,7 +460,12 @@ _READ_MESSAGE_AREA_JS = """
       hash = (hash * 31 + text.charCodeAt(i)) | 0;
     }
 
-    return { lines: lines.length, last: lines[lines.length - 1] || '', hash: String(hash) };
+    return {
+      lines: lines.length,
+      head: lines.slice(0, 3),
+      last: lines[lines.length - 1] || '',
+      hash: String(hash),
+    };
   }
 """
 
@@ -473,8 +480,10 @@ def _read_message_area(page: Any) -> MessageArea:
     if not isinstance(raw, dict):
         return MessageArea()
     try:
+        head = raw.get("head")
         return MessageArea(
             lines=int(raw.get("lines", -1)),
+            head=tuple(str(x) for x in head) if isinstance(head, list) else (),
             last=str(raw.get("last") or ""),
             fingerprint=str(raw.get("hash") or ""),
         )
@@ -482,17 +491,37 @@ def _read_message_area(page: Any) -> MessageArea:
         return MessageArea()
 
 
-def _area_gained_our_message(base: MessageArea, now: MessageArea, expected: str) -> bool:
-    """消息区里是不是**新增了我们刚发的那条**。
+# 只看开头几行。真机实测：发送后开头是「时间分隔符 + 我们的消息」，
+# 例如 ['刚刚', '1', '19分钟前', ...] —— 我们的内容在第 2 行（索引 1）。
+_AREA_HEAD_LINES = 3
 
-    三条同时满足才算数（见文件上方那段说明）：读得到、最后一行是我们发的内容、
-    且消息区确实变了。任何一条不成立都返回 ``False`` —— 宁可少一条判据，也不误报成功。
+
+def _area_gained_our_message(base: MessageArea, now: MessageArea, expected: str) -> bool:
+    """消息区开头是不是**新增了我们刚发的那条**。
+
+    规则来自 **2026-10-12 的真机前后对比**（发一条给 .p，发送前后各 dump 一次）：
+
+    ```
+    发送前  行数=18  开头: ['19分钟前', '1', '昨天 09:55', '昨天 09:30', '1', '前天']
+    发送后  行数=20  开头: ['刚刚',     '1', '19分钟前',   '1', ...]
+                              ↑ 时间分隔符 + 我们的消息，插在最前面
+    ```
+
+    ⇒ 消息区是**倒序**的：新消息出现在**开头**。
+    （前一版按"追加在末尾"写、还要求"最后一行是所发内容" —— 而最后一行其实是
+      好友昵称 ``爱心蛋糕sama``，所以那一版永远不会触发。）
+
+    同时要求：开头几行里有我们发的内容、整段指纹变了、且行数没减少。
+    少了「开头必须有我们的内容」这条，对方恰好回消息就会被当成我们发送成功。
     """
     if not base.usable or not now.usable or not expected:
         return False
-    if normalize_name(now.last) != normalize_name(expected):
+    want = normalize_name(expected)
+    if not any(normalize_name(line) == want for line in now.head[:_AREA_HEAD_LINES]):
         return False
-    return now.fingerprint != base.fingerprint or now.lines > base.lines
+    if now.lines < base.lines:
+        return False
+    return now.fingerprint != base.fingerprint
 
 
 def _count_messages(page: Any) -> int:
