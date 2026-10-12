@@ -501,18 +501,14 @@ class TestMessageAreaSignal:
         base = confirmer.MessageArea(
             lines=27, head=("刚刚", "嘿嘿"), last="88dog钥匙商城", fingerprint="before"
         )
-        now = confirmer.MessageArea(
-            lines=26, head=("1", "刚刚"), last="88dog钥匙商城", fingerprint="after"
-        )
+        now = confirmer.MessageArea(lines=26, head=("1", "刚刚"), last="88dog钥匙商城", fingerprint="after")
 
         assert confirmer._area_gained_our_message(base, now, "1")
 
     def test_rejects_group_when_a_member_replied(self) -> None:
         """群聊里别人刚发过消息（昵称 + 内容占 2 行）→ 我们的内容被挤出窗口，不能算成功。"""
         base = confirmer.MessageArea(lines=27, head=("刚刚", "嘿嘿"), fingerprint="aaa")
-        now = confirmer.MessageArea(
-            lines=28, head=("刚刚", "不夜甜馨", "1"), fingerprint="bbb"
-        )
+        now = confirmer.MessageArea(lines=28, head=("刚刚", "不夜甜馨", "1"), fingerprint="bbb")
 
         assert not confirmer._area_gained_our_message(base, now, "1")
 
