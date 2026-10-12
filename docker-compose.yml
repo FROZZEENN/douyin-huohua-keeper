@@ -28,6 +28,23 @@ services:
     # Chromium 需要一块像样的 /dev/shm，默认 64M 会崩
     shm_size: "1gb"
 
+    # ⚠️ 关键（2026-09-25 事故后新增，别删）
+    #
+    # Chromium 每次启动都会在系统临时目录建一份**全新的 profile**
+    # （playwright_chromiumdev_profile-*，成千上万个小文件），
+    # 还会写 shm 临时文件（容器里加了 --disable-dev-shm-usage，会被从 tmpfs 推到磁盘）。
+    # 而容器 /tmp 默认位于**可写层 = 宿主系统盘**。
+    #
+    # 本实例 ecs.e-c1m1.large 的云盘带宽只有 0.4 Gbit/s ≈ **50 MB/s 且无突发**，
+    # 实测：一次扫码登录的浏览器持续写盘几分钟就把额度吃干 → 触发阿里云
+    # SysDiskBPS 告警 → 进程集体卡在 D 状态 → **全机假死**（SSH 拿不到 banner、
+    # HTTPS 无响应，只有控制台重启才能救回来）。
+    #
+    # 把 /tmp 挂成内存盘后，这部分 I/O 完全不落盘。
+    # 代价：最多占 384MB 内存（tmpfs 按实际使用计，不是预留），本机 2GB 够用。
+    tmpfs:
+      - /tmp:size=384m,mode=1777
+
     environment:
       # --- 工作台访问 ---
       HUOHUA_HOST: "0.0.0.0"

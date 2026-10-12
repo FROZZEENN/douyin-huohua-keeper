@@ -399,102 +399,136 @@ class TestConfirmationFlow:
         assert outcome.state in {ConfirmState.FAILED, ConfirmState.UNCERTAIN}
 
 
-class AnchorOnlyPage(FakePage):
-    """只有**锚点判据**能命中的页面替身。
+def _area(lines: int, last: str, fingerprint: str) -> dict[str, Any]:
+    return {"lines": lines, "last": last, "hash": fingerprint}
 
-    - 打锚点时回显 nonce（所以锚点是有效的）；
-    - 之后每次都回答「锚点后面多了新节点」；
-    - 消息区行数恒为 0（不增长），会话预览始终不匹配 —— 其余判据全部失效。
+
+class MessageAreaShapePage(FakePage):
+    """只让**消息区判据**命中的页面替身。
+
+    - 第一次读消息区返回 ``before``（快照基线），之后返回 ``after``；
+    - 其余脚本（needle 行数）一律返回 0，保证 needle 判据不生效；
+    - 会话列表预览由 ``fake_entries`` 控制，测试里故意让它"本来就等于内容"。
     """
 
+    def __init__(self, *, before: dict[str, Any], after: dict[str, Any], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._before = before
+        self._after = after
+        self._area_calls = 0
+
     def evaluate(self, script: str, arg: Any = None) -> Any:
-        if "data-huohua-anchor" in script:
-            if "setAttribute" in script:
-                return arg["nonce"]
-            return "new_after"
+        if script is confirmer._READ_MESSAGE_AREA_JS:
+            self._area_calls += 1
+            return self._before if self._area_calls == 1 else self._after
         return 0
 
 
-class TestAnchorSignal:
-    """锚点判据：与消息内容、与消息区总条数都无关。"""
+class TestMessageAreaSignal:
+    """消息区判据 —— 只用真机验证过的 MessageList 路径。"""
 
-    def test_mark_returns_nonce_when_page_echoes_it(self) -> None:
-        class EchoPage:
+    def test_reads_area_shape(self) -> None:
+        class Page:
             def evaluate(self, script: str, arg: Any = None) -> Any:
-                assert "setAttribute" in script, "应该走的是打锚点脚本"
-                return arg["nonce"]
+                return _area(30, "你好", "abc")
 
-        assert confirmer._mark_last_message(EchoPage())
+        area = confirmer._read_message_area(Page())
 
-    def test_mark_returns_empty_when_page_cannot_mark(self) -> None:
-        class NoopPage:
+        assert area.usable
+        assert (area.lines, area.last, area.fingerprint) == (30, "你好", "abc")
+
+    @pytest.mark.parametrize("raw", [None, "not-a-dict", [], 42])
+    def test_unreadable_area_is_not_usable(self, raw: Any) -> None:
+        class Page:
             def evaluate(self, script: str, arg: Any = None) -> Any:
-                return ""
+                return raw
 
-        assert confirmer._mark_last_message(NoopPage()) == ""
+        assert not confirmer._read_message_area(Page()).usable
 
-    def test_mark_survives_evaluate_raising(self) -> None:
-        """打不上锚点不能把流程搞崩 —— 只是这次少一条判据。"""
-
-        class BoomPage:
+    def test_evaluate_raising_is_not_usable(self) -> None:
+        class Page:
             def evaluate(self, script: str, arg: Any = None) -> Any:
                 raise RuntimeError("boom")
 
-        assert confirmer._mark_last_message(BoomPage()) == ""
+        assert not confirmer._read_message_area(Page()).usable
 
-    @pytest.mark.parametrize(
-        ("state", "expected"),
-        [("new_after", True), ("still_last", False), ("gone", None), ("", None)],
-    )
-    def test_anchor_state_mapping(self, state: str, expected: bool | None) -> None:
-        class StatePage:
-            def evaluate(self, script: str, arg: Any = None) -> Any:
-                return state
+    def test_detects_eviction_case(self) -> None:
+        """**复现误报场景**：行数不变（虚拟列表挤掉旧行），但整段文本变了。
 
-        assert confirmer._anchor_has_new_message(StatePage(), "n1") is expected
-
-    def test_missing_nonce_is_unknown(self) -> None:
-        assert confirmer._anchor_has_new_message(FakePage(), "") is None
-
-    def test_confirms_when_anchor_gains_a_new_message(self, fake_entries) -> None:
-        """**复现并修掉 2026-09-20~22 的误报场景**。
-
-        恒定文案（预览本来就是「1」）+ 会话本来就在列表首位（跳无可跳）
-        + 消息区条数没变（虚拟列表挤掉旧的）—— 三条老判据全灭，
-        只有「锚点之后多了一个节点」还成立。以前这种情况会报「不确定」。
+        恒定文案下旧实现会在这里判「不确定」—— 判据全灭。
         """
+        base = confirmer.MessageArea(lines=30, last="1", fingerprint="aaa")
+        now = confirmer.MessageArea(lines=30, last="1", fingerprint="bbb")
+
+        assert confirmer._area_gained_our_message(base, now, "1")
+
+    def test_detects_plain_growth(self) -> None:
+        base = confirmer.MessageArea(lines=30, last="旧消息", fingerprint="aaa")
+        now = confirmer.MessageArea(lines=31, last="1", fingerprint="bbb")
+
+        assert confirmer._area_gained_our_message(base, now, "1")
+
+    def test_rejects_when_last_line_is_not_ours(self) -> None:
+        """⚠️ 最关键的安全用例：对方恰好回消息时，绝不能被当成我们发送成功。"""
+        base = confirmer.MessageArea(lines=30, last="旧消息", fingerprint="aaa")
+        now = confirmer.MessageArea(lines=31, last="你怎么不回我", fingerprint="bbb")
+
+        assert not confirmer._area_gained_our_message(base, now, "1")
+
+    def test_rejects_when_nothing_changed(self) -> None:
+        base = confirmer.MessageArea(lines=30, last="1", fingerprint="aaa")
+        now = confirmer.MessageArea(lines=30, last="1", fingerprint="aaa")
+
+        assert not confirmer._area_gained_our_message(base, now, "1")
+
+    def test_rejects_when_area_unreadable(self) -> None:
+        base = confirmer.MessageArea()  # 没读到
+        now = confirmer.MessageArea(lines=30, last="1", fingerprint="bbb")
+
+        assert not confirmer._area_gained_our_message(base, now, "1")
+
+    def test_confirms_via_message_area_only(self, fake_entries) -> None:
+        """端到端：其余判据全灭，只靠消息区判据也要判成功（这就是修的那个 bug）。"""
         fake_entries((ConversationEntry(name="小明", raw_text="小明", preview="1", index=0),))
 
         outcome = confirmer.confirm_sent(
-            AnchorOnlyPage(),
+            MessageAreaShapePage(before=_area(30, "1", "aaa"), after=_area(30, "1", "bbb")),
             contact_name="小明",
             expected_text="1",
             timeout_ms=3_000,
             poll_interval=0.01,
             require_stable=2,
             baseline=confirmer.ConversationSnapshot(
-                preview="1", index=0, message_count=15, needle_count=1, anchor="nonce123"
+                preview="1",
+                index=0,
+                message_count=15,
+                needle_count=1,
+                area=confirmer.MessageArea(lines=30, last="1", fingerprint="aaa"),
             ),
         )
 
         assert outcome.state is ConfirmState.CONFIRMED
-        assert outcome.status is RunStatus.SUCCESS
-        assert "新气泡" in outcome.detail
+        assert "最后一条就是所发内容" in outcome.detail
 
-    def test_anchor_absent_keeps_old_behaviour(self, fake_entries) -> None:
-        """没打上锚点（老快照 / 选择器失配）时，行为与以前一致 —— 不能因此误报成功。"""
+    def test_uncertain_detail_reports_available_signals(self, fake_entries) -> None:
+        """超时未确认时，说明里要写清「这次有哪些判据可用」—— 可诊断性。"""
         fake_entries((ConversationEntry(name="小明", raw_text="小明", preview="1", index=0),))
 
         outcome = confirmer.confirm_sent(
-            AnchorOnlyPage(),
+            MessageAreaShapePage(before=_area(30, "1", "aaa"), after=_area(30, "1", "aaa")),
             contact_name="小明",
             expected_text="1",
             timeout_ms=300,
             poll_interval=0.01,
             require_stable=2,
             baseline=confirmer.ConversationSnapshot(
-                preview="1", index=0, message_count=15, needle_count=1, anchor=""
+                preview="1",
+                index=0,
+                message_count=15,
+                needle_count=1,
+                area=confirmer.MessageArea(lines=30, last="1", fingerprint="aaa"),
             ),
         )
 
         assert outcome.state is ConfirmState.UNCERTAIN
+        assert "本次可用判据" in outcome.detail

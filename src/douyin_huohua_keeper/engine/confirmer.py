@@ -27,7 +27,6 @@ from __future__ import annotations
 import enum
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +73,19 @@ class ConfirmOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageArea:
+    """消息区的一次观测（只用于前后对比，绝不看绝对值）。"""
+
+    lines: int = -1
+    last: str = ""
+    fingerprint: str = ""
+
+    @property
+    def usable(self) -> bool:
+        return self.lines >= 0
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationSnapshot:
     """发送**之前**对会话的观察，用于「到底有没有变化」的比对。"""
 
@@ -83,13 +95,8 @@ class ConversationSnapshot:
     message_count: int = -1
     # 消息区里「正好等于要发的内容」的行数（-1 = 没读到）
     needle_count: int = -1
-    # 「发送前最后一条消息」的锚点 nonce（空串 = 没打上）。
-    #
-    # 为什么需要它：其余判据在「恒定文案 + 会话本来就在列表首位 + 消息区是虚拟列表」
-    # 三种情况同时出现时会**全部失效** —— 预览没变、会话没跳位、条数被挤掉，
-    # 于是消息明明发出去了却报「不确定」（2026-09-20~22 实测，每天 1~2 个）。
-    # 锚点判据不看内容也不看条数：只要锚点**之后**多出一个节点，就是真的新增了一条。
-    anchor: str = ""
+    # 发送前消息区的形状（最后一行 / 行数 / 整段指纹）。见 _area_gained_our_message。
+    area: MessageArea = MessageArea()
 
     @property
     def usable(self) -> bool:
@@ -118,7 +125,7 @@ def snapshot_conversation(page: Any, contact_name: str, *, expected_text: str = 
         raw_text=(entry.raw_text if entry else "") or "",
         message_count=_count_messages(page),
         needle_count=_count_message_lines(page, expected_text),
-        anchor=_mark_last_message(page),
+        area=_read_message_area(page),
     )
 
 
@@ -142,8 +149,9 @@ def confirm_sent(
 
     现在的判据是「预览匹配期望内容」**并且**至少满足一条变化证据：
 
-    - ``anchor_new``：**打锚点的那条消息之后出现了新节点**（2026-09-23 新增，最强）——
-      不看内容、不看条数，恒定文案 + 会话本来就在首位 + 虚拟列表挤节点都影响不到它；
+    - ``area_gained``：**消息区最后一行正是我们发的内容，且消息区确实变了**
+      （2026-09-23 首次尝试、2026-10-12 重做）—— 恒定文案 + 会话本来就在首位
+      + 虚拟列表挤掉旧行这三种情况同时踩上时，只有它还能给出证据；
     - ``preview_changed``：预览和发送前不一样了（对内容无关，适用面最广）；
     - ``moved_to_top``：该会话从列表中部跳到了第 1 个（新消息会把会话顶到最前）；
     - ``message_grew``：会话内的消息条数变多了（与内容无关，最适用于恒定文案）；
@@ -185,11 +193,21 @@ def confirm_sent(
         if preview:
             last_preview = preview
 
-        # 证据零（最强）：打锚点的那条消息之后，出现了新的节点。
-        #
-        # 不用看内容、也不看消息区总条数 —— 因此「恒定文案 + 会话本来就在列表首位
-        # + 虚拟列表把旧节点挤掉」这三条同时踩上时它依然有效（其余判据会全灭）。
-        anchor_new = _anchor_has_new_message(page, base.anchor) is True
+        # ⚠️ 失败标记**先于**成功证据判断：宁可判失败，也绝不能因为
+        #    「消息区变了」而把一次带失败标记的发送判成成功。
+        if _has_failure_marker(page):
+            elapsed = time.monotonic() - started
+            return ConfirmOutcome(
+                status=RunStatus.FAILED,
+                state=ConfirmState.FAILED,
+                detail="页面上出现了发送失败标记",
+                failure_kind=FailureKind.TRANSIENT,
+                elapsed_seconds=elapsed,
+            )
+
+        # 证据零（专治「恒定文案 + 会话已在首位 + 虚拟列表挤占」）：
+        # 消息区最后一行正是我们发的内容，且消息区确实变了。
+        area_gained = _area_gained_our_message(base.area, _read_message_area(page), expected_text)
 
         # 证据一（与预览无关、恒定文案也能用）：
         # 消息区里「正好是这条内容」的行数变多了 → 确实新增了一条气泡。
@@ -202,13 +220,13 @@ def confirm_sent(
         preview_ok = bool(preview and expected and _preview_matches(preview, expected))
         preview_changed = preview_ok and _changed_vs_baseline(page, preview, index, base)
 
-        if anchor_new or needle_grew or preview_changed:
+        if area_gained or needle_grew or preview_changed:
             saw_change = True
             stable_hits += 1
             if stable_hits >= require_stable:
                 elapsed = time.monotonic() - started
-                if anchor_new:
-                    why = "消息区里出现了新气泡"
+                if area_gained:
+                    why = "消息区已更新（最后一条就是所发内容）"
                 elif needle_grew:
                     why = "消息区里新增了这条内容"
                 else:
@@ -224,16 +242,6 @@ def confirm_sent(
             # 没看到任何变化 —— 计数归零，避免累计到「零星的几次」
             stable_hits = 0
 
-        if _has_failure_marker(page):
-            elapsed = time.monotonic() - started
-            return ConfirmOutcome(
-                status=RunStatus.FAILED,
-                state=ConfirmState.FAILED,
-                detail="页面上出现了发送失败标记",
-                failure_kind=FailureKind.TRANSIENT,
-                elapsed_seconds=elapsed,
-            )
-
         # 弱证据：输入框被清空说明页面接受了一次发送动作
         if not saw_input_cleared and _is_input_cleared(page):
             saw_input_cleared = True
@@ -242,6 +250,15 @@ def confirm_sent(
         time.sleep(poll_interval)
 
     elapsed = time.monotonic() - started
+
+    # 出问题时，把「这次到底有哪些判据可用」写进说明里。
+    # ⚠️ 这是血泪教训：上一版锚点判据是**静默失效**的 —— 上线三周、28 次运行触发 0 次，
+    #    报告里却看不出任何异常，只能靠事后翻历史报告统计才发现。可诊断性必须做进去。
+    diag = (
+        f"（本次可用判据：消息区={'可读' if base.area.usable else '没读到'}"
+        f"/{base.area.lines}行、needle={base.needle_count}、"
+        f"预览={'匹配' if _preview_matches(base.preview, expected) else '不匹配'}）"
+    )
 
     # 超时了。三种情况分开说清楚，因为「该不该重试」完全不同。
     #
@@ -255,7 +272,7 @@ def confirm_sent(
             detail=(
                 "会话列表里本来就显示着和这条相同的内容（上一次发的），"
                 f"而 {elapsed:.0f}s 内没有观察到任何变化，**无法确认这次是否真的发出去了**。"
-                "消息可能已发出，因此不会自动重试（避免重复发送）。请手动看一眼会话确认。"
+                "消息可能已发出，因此不会自动重试（避免重复发送）。请手动看一眼会话确认。" + diag
             ),
             failure_kind=FailureKind.TRANSIENT,
             observed_preview=last_preview,
@@ -269,7 +286,7 @@ def confirm_sent(
             detail=(
                 f"输入框已清空但 {elapsed:.0f}s 内没能在会话里确认到这条消息"
                 "（消息区也没读到新增）。消息**可能已发出**，因此不会自动重试"
-                "（避免重复发送）。请手动检查一下会话。"
+                "（避免重复发送）。请手动检查一下会话。" + diag
             ),
             failure_kind=FailureKind.TRANSIENT,
             observed_preview=last_preview,
@@ -387,99 +404,88 @@ def _count_message_lines(page: Any, text: str) -> int:
 
 
 # -----------------------------------------------------------------------------
-# 锚点判据：发送前给「最后一条消息」做个记号，发送后看它后面有没有多出新节点。
+# 消息区判据 —— **只用真机验证过的选择器**。
 #
-# 为什么需要它（2026-09-20~22 实测的误报）：
-#   恒定文案的账号下，会同时踩上三个坑，导致**所有**判据集体失效：
-#     ① 预览文本没变（每天发的是同一句）      → 判据「预览变了」失效
-#     ② 会话本来就在列表第 1 位（昨天发过）   → 判据「跳到第 1 位」失效
-#     ③ 消息区是虚拟列表：新增一条同时挤掉一条 → 判据「条数变多」失效
+# 为什么需要它（2026-09-20~22 与 10-11 实测的误报）：
+#   恒定文案的账号下会同时踩上三个坑，导致其余判据集体失效：
+#     ① 预览文本没变（每天发的是同一句）        → 判据「预览变了」失效
+#     ② 会话本来就在列表第 1 位（昨天刚发过）   → 判据「跳到第 1 位」失效
+#     ③ 消息区是虚拟列表：新增一条同时挤掉一条  → 判据「条数变多」失效
 #   于是消息明明发出去了，却报「结果不确定」。
 #
-# 锚点判据不看内容、也不看总条数：只要在**我们打过记号的这一条之后**出现新节点，
-# 就说明消息区确实多了一条。前提是消息按时间顺序排列（新的在末尾）—— 聊天界面
-# 都是这样；万一不是，这条判据只是不生效（保守），绝不会误报成功。
+# ⚠️ 曾经的错误做法（2026-09-23 上线、2026-10-12 删除，**别再照抄**）：
+#   给「最后一条消息节点」打 data-* 记号，再看它后面有没有新节点。听起来很稳，
+#   但取节点用的是 ``MESSAGE_ITEM_CANDIDATES`` —— 那组选择器在真机上**根本匹配不到**
+#   （selectors.py 里自己就写着「未经真机确认」），于是锚点从没打上、判据被静默跳过：
+#   上线三周、28 次运行，触发 0 次，误报一个没少。
+#
+# 现在的做法只用**实测有效的那条路径** —— ``[class*="MessageList"]`` 容器读 innerText
+# （``_count_message_lines`` 走的就是它，每天命中 9~10 次）。基线记住消息区的形状，
+# 发送后要求同时满足：
+#   1. 最后一行**正好是我们发的内容**  → 挡住「对方恰好回了消息」被误判成发送成功；
+#   2. 消息区**变了**（整段指纹变 或 行数变多）→ 虚拟列表挤掉旧行时行数不变，
+#      但整段文本必然变化，所以「挤占」这种情况也覆盖得到。
 # -----------------------------------------------------------------------------
 
-# 收集页面上所有「消息节点」，并找出文档顺序里最后的那一个。
-# 两个脚本共用这段，避免逻辑漂移。
-_MSG_NODES_JS = """
-  const nodes = new Set();
-  for (const s of selectors) {
-    try { document.querySelectorAll(s).forEach((n) => nodes.add(n)); } catch (e) { /* 无效选择器跳过 */ }
+_READ_MESSAGE_AREA_JS = """
+  () => {
+    const boxes = Array.from(document.querySelectorAll('[class*="MessageList"], [data-e2e="message-list"]'))
+      .filter((el) => (el.innerText || '').trim().length > 0);
+    if (!boxes.length) return null;
+
+    // 取文本最多的那个（页面上可能出现多个同名前缀的容器）
+    let best = boxes[0];
+    let bestLen = -1;
+    for (const box of boxes) {
+      const len = (box.innerText || '').length;
+      if (len > bestLen) { bestLen = len; best = box; }
+    }
+
+    const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+    const lines = (best.innerText || '').split('\\n').map(norm).filter(Boolean);
+    const text = lines.join('\\n');
+
+    // 32 位指纹：只用来判断「变没变」，不做安全用途
+    let hash = 0;
+    for (let i = 0; i < text.length; i += 1) {
+      hash = (hash * 31 + text.charCodeAt(i)) | 0;
+    }
+
+    return { lines: lines.length, last: lines[lines.length - 1] || '', hash: String(hash) };
   }
-  if (!nodes.size) return "";
-  let last = null;
-  for (const n of nodes) {
-    if (last === null) { last = n; continue; }
-    if (last.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) last = n;
-  }
-  if (!last) return "";
 """
 
-_MARK_LAST_MESSAGE_JS = (
-    """(args) => {
-  const { selectors, nonce } = args;
-"""
-    + _MSG_NODES_JS
-    + """  last.setAttribute('data-huohua-anchor', nonce);
-  return nonce;
-}
-"""
-)
 
-_ANCHOR_STATE_JS = (
-    """(args) => {
-  const { selectors, nonce } = args;
-  const anchor = document.querySelector('[data-huohua-anchor="' + nonce + '"]');
-  if (!anchor) return 'gone';
-"""
-    + _MSG_NODES_JS
-    + """  return last === anchor ? 'still_last' : 'new_after';
-}
-"""
-)
-
-
-def _mark_last_message(page: Any) -> str:
-    """给「当前最后一条消息」打锚点，返回 nonce；打不上返回空串。
-
-    打不上不致命 —— 只是这次少一条判据，判定回落到原来的三条（更保守）。
-    """
-    nonce = uuid.uuid4().hex
+def _read_message_area(page: Any) -> MessageArea:
+    """读一次消息区的形状；读不到返回 ``usable=False`` 的空对象。"""
     try:
-        got = page.evaluate(
-            _MARK_LAST_MESSAGE_JS,
-            {"selectors": list(sel.MESSAGE_ITEM_CANDIDATES), "nonce": nonce},
-        )
+        raw = page.evaluate(_READ_MESSAGE_AREA_JS)
     except Exception as exc:  # noqa: BLE001
-        LOGGER.debug("给最后一条消息打锚点失败：%s", exc)
-        return ""
-    return nonce if got == nonce else ""
-
-
-def _anchor_has_new_message(page: Any, nonce: str) -> bool | None:
-    """锚点之后是否出现了新消息。
-
-    - ``True``  —— 出现了（**这是真的新增了一条**，与内容、与总条数都无关）
-    - ``False`` —— 锚点还是最后一个（没看到新增）
-    - ``None``  —— 判不了（锚点被虚拟列表挤掉 / 读不到）→ 调用方当作「没有这条判据」
-    """
-    if not nonce:
-        return None
+        LOGGER.debug("读取消息区形状失败：%s", exc)
+        return MessageArea()
+    if not isinstance(raw, dict):
+        return MessageArea()
     try:
-        state = page.evaluate(
-            _ANCHOR_STATE_JS,
-            {"selectors": list(sel.MESSAGE_ITEM_CANDIDATES), "nonce": nonce},
+        return MessageArea(
+            lines=int(raw.get("lines", -1)),
+            last=str(raw.get("last") or ""),
+            fingerprint=str(raw.get("hash") or ""),
         )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.debug("读取消息锚点失败：%s", exc)
-        return None
-    if state == "new_after":
-        return True
-    if state == "still_last":
+    except (TypeError, ValueError):
+        return MessageArea()
+
+
+def _area_gained_our_message(base: MessageArea, now: MessageArea, expected: str) -> bool:
+    """消息区里是不是**新增了我们刚发的那条**。
+
+    三条同时满足才算数（见文件上方那段说明）：读得到、最后一行是我们发的内容、
+    且消息区确实变了。任何一条不成立都返回 ``False`` —— 宁可少一条判据，也不误报成功。
+    """
+    if not base.usable or not now.usable or not expected:
         return False
-    return None
+    if normalize_name(now.last) != normalize_name(expected):
+        return False
+    return now.fingerprint != base.fingerprint or now.lines > base.lines
 
 
 def _count_messages(page: Any) -> int:
