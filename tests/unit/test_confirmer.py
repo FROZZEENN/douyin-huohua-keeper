@@ -491,9 +491,28 @@ class TestMessageAreaSignal:
 
         assert not confirmer._area_gained_our_message(base, now, "1")
 
-    def test_rejects_when_lines_shrank(self) -> None:
-        base = confirmer.MessageArea(lines=18, head=("19分钟前", "1"), fingerprint="aaa")
-        now = confirmer.MessageArea(lines=5, head=("刚刚", "1"), fingerprint="bbb")
+    def test_detects_the_group_chat_case(self) -> None:
+        """**照抄 2026-10-12 真机探测到的群聊数据**。
+
+        群聊里两个特点：① 我们的消息直接落在索引 0（自己的消息不带昵称行）；
+        ② 行数会**减少**（27→26，虚拟列表挤掉 2 行只加 1 行）。
+        曾经有一条"行数不能减少"的保险，正是它让群聊永远确认不了。
+        """
+        base = confirmer.MessageArea(
+            lines=27, head=("刚刚", "嘿嘿"), last="88dog钥匙商城", fingerprint="before"
+        )
+        now = confirmer.MessageArea(
+            lines=26, head=("1", "刚刚"), last="88dog钥匙商城", fingerprint="after"
+        )
+
+        assert confirmer._area_gained_our_message(base, now, "1")
+
+    def test_rejects_group_when_a_member_replied(self) -> None:
+        """群聊里别人刚发过消息（昵称 + 内容占 2 行）→ 我们的内容被挤出窗口，不能算成功。"""
+        base = confirmer.MessageArea(lines=27, head=("刚刚", "嘿嘿"), fingerprint="aaa")
+        now = confirmer.MessageArea(
+            lines=28, head=("刚刚", "不夜甜馨", "1"), fingerprint="bbb"
+        )
 
         assert not confirmer._area_gained_our_message(base, now, "1")
 
