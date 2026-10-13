@@ -45,6 +45,16 @@ services:
     tmpfs:
       - /tmp:size=384m,mode=1777
 
+    # 把 .env 里的**所有** HUOHUA_* 变量都喂给容器。
+    #
+    # 为什么需要：下面的 environment: 是「显式罗列」的，只列了必填/常用项 ——
+    # 用户后来自己往 .env 里加的可选配置（比如 HUOHUA_LOGIN_LIFETIME_DAYS）
+    # **不会自动生效**，而且没有任何报错，极难发现（实测踩过）。
+    # 加了 env_file 之后，往 .env 里加任何配置都能生效；下面 environment: 里
+    # 显式写的仍然优先生效（Docker 的规则），所以必填校验不受影响。
+    env_file:
+      - .env
+
     environment:
       # --- 工作台访问 ---
       HUOHUA_HOST: "0.0.0.0"
