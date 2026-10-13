@@ -392,6 +392,28 @@ class SchedulerSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class LoginSettings:
+    """登录态的「保守寿命」策略。
+
+    为什么要做成可配：判定登录态是否过期用的是**状态文件的年龄**（纯本地、零成本），
+    而不是去问抖音。文件只在登录时写一次，所以「攒够 lifetime_days 天」就会被判过期 ——
+    哪怕会话其实还能用（实测 cookie 自带到期时间可以到一年多以后）。
+
+    两个值的关系是硬的：``reminder_days`` **必须小于** ``lifetime_days``，
+    否则「该续期了」会永远为真、界面无休止催你重扫码（这个坑真实踩过）。
+    """
+
+    # 文件超过这么多天就判「已过期」，不再尝试发送。
+    #
+    # ⚠️ 注意：**每次发送成功都会刷新文件时间戳**（见 scheduler/runner.py），
+    #    所以它实际的含义是「距上次验证登录态可用过了多久」——
+    #    正常情况下永远是 0 天，只有连着好几天没跑成/没成功才会涨上来。
+    lifetime_days: float = 7.0
+    # 剩余不足这么多天就说「该重登了」。必须小于 lifetime_days。
+    reminder_days: float = 3.0
+
+
+@dataclass(frozen=True, slots=True)
 class WorkbenchSettings:
     """工作台相关。"""
 
@@ -443,6 +465,28 @@ class WorkbenchSettings:
 # =============================================================================
 
 
+def _login_settings_from_env() -> LoginSettings:
+    """读登录态寿命配置，并校验两者的关系。
+
+    校验不是形式主义：``reminder_days >= lifetime_days`` 会让「该续期了」永远为真，
+    界面无休止地催你重扫码（历史真实事故）。写错就报错，别静默容忍。
+    """
+    lifetime = _float("LOGIN_LIFETIME_DAYS", 7.0, minimum=0.5)
+    reminder = _float("LOGIN_REMINDER_DAYS", 3.0, minimum=0.1)
+    if lifetime > 365.0:
+        raise ConfigError(
+            f"{PREFIX}LOGIN_LIFETIME_DAYS 最大 365 天（当前 {lifetime}）："
+            "再大就等于关掉了「该重登了」的提醒。"
+        )
+    if reminder >= lifetime:
+        raise ConfigError(
+            f"{PREFIX}LOGIN_REMINDER_DAYS（{reminder}）必须小于 "
+            f"{PREFIX}LOGIN_LIFETIME_DAYS（{lifetime}）：否则「该续期了」会永远为真，"
+            "界面会无休止催你重扫码。"
+        )
+    return LoginSettings(lifetime_days=lifetime, reminder_days=reminder)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """全部配置。一次性从环境读取，之后不可变。"""
@@ -452,6 +496,7 @@ class Settings:
     notify: NotifySettings
     scheduler: SchedulerSettings
     workbench: WorkbenchSettings
+    login: LoginSettings
     data_dir: Path
     log_dir: Path
     log_level: str = "INFO"
@@ -464,6 +509,7 @@ class Settings:
             notify=NotifySettings.from_env(),
             scheduler=SchedulerSettings.from_env(),
             workbench=WorkbenchSettings.from_env(),
+            login=_login_settings_from_env(),
             data_dir=Path(_str("DATA_DIR", "data")),
             log_dir=Path(_str("LOG_DIR", "logs")),
             log_level=_str("LOG_LEVEL", "INFO").upper(),

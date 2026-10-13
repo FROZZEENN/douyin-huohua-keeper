@@ -23,6 +23,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .. import runstate
@@ -155,6 +156,24 @@ def run_once(
 # =============================================================================
 # 执行主体
 # =============================================================================
+
+
+def _refresh_state_mtime(state_path: Any) -> None:
+    """登录态被验证可用后，刷新它的文件时间戳。
+
+    **绝不能因为这里出错影响任务结果** —— 它只是把「保守寿命」的起点往后挪，
+    失败了顶多是下次早点提醒你重登。所以一切异常都吞掉，只记日志。
+    """
+    path = Path(state_path)
+    if not path.is_file():
+        # 不要凭空造一个空文件出来 —— 那会让后续的登录态检查看到一份「存在但无效」的状态，
+        # 反而把「没登录过」这件事说得更含糊。
+        return
+    try:
+        path.touch()
+        LOGGER.info("本次有发送成功，已刷新登录态文件时间戳（保守寿命从今天重新计）")
+    except OSError as exc:
+        LOGGER.warning("刷新登录态文件时间戳失败（不影响本次发送结果）：%s", exc)
 
 
 def _execute(
@@ -452,6 +471,24 @@ def _finalize(
             repo.save_report(report)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("保存运行报告失败：%s", exc)
+
+        # 有人发送成功 ⇒ **这份登录态此刻是活的** ⇒ 刷新状态文件时间戳。
+        #
+        # 为什么必须做：`check_cookie_freshness` 是纯本地判断，靠的是**文件年龄**，
+        # 而文件只在登录时写一次 —— 于是明明一直好用，攒够「保守寿命」也会被判过期、
+        # 催你重新扫码（假警报）。刷新之后，文件年龄的真实含义变成
+        # 「距上次验证登录态可用过了多久」：正常使用永远是 0 天，
+        # 只有连着几天没跑成/没成功才会涨上来提醒你。
+        #
+        # 只看**任一成功**就够：能发出去一条，就证明会话还有效。
+        #
+        # 路径在这里自己取一次（`_finalize` 拿不到 `_execute` 的局部变量），
+        # 取不到就当没这回事 —— 绝不因为刷新时间戳失败而影响任务结果。
+        if any(o.status is RunStatus.SUCCESS for o in outcomes_tuple):
+            try:
+                _refresh_state_mtime(repo.account_state_path(_default_account_id(repo)))
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("跳过刷新登录态时间戳：%s", exc)
 
     # --- 告警 ---
     #

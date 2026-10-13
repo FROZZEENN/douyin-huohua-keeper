@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from douyin_huohua_keeper.config import load_settings
+from douyin_huohua_keeper.config import load_settings, reset_settings
 from douyin_huohua_keeper.engine import navigator
 from douyin_huohua_keeper.engine.auth import check_cookie_freshness
 from douyin_huohua_keeper.models import Contact
@@ -1018,3 +1018,63 @@ class TestEngineRespectsOutcomeContract:
 
         assert outcome.status is RunStatus.FAILED
         assert "BrowserError" in outcome.detail
+
+
+class TestSessionLifetimeConfig:
+    """登录态「保守寿命」可配 —— 且默认行为不变。"""
+
+    def _state_file(self, tmp_path: Path, *, age_days: float) -> Path:
+        path = tmp_path / "main.state.json"
+        path.write_text(json.dumps({"cookies": [{"name": "sessionid", "value": "x"}]}), encoding="utf-8")
+        stamp = time.time() - age_days * 86400
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def test_ten_day_old_state_expires_by_default(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """默认还是 7 天 —— 这次改动不能偷偷放宽原有的保守策略。"""
+        monkeypatch.delenv("HUOHUA_LOGIN_LIFETIME_DAYS", raising=False)
+        reset_settings()
+
+        status = check_cookie_freshness(self._state_file(tmp_path, age_days=10))
+
+        assert status.expired is True
+
+    def test_ten_day_old_state_survives_with_longer_lifetime(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """配成 30 天之后，10 天的文件不该再被判过期。
+
+        （这正是用户要的效果：cookie 实测能活一年多，「7 天」只是自己设的保守值。）
+        """
+        monkeypatch.setenv("HUOHUA_LOGIN_LIFETIME_DAYS", "30")
+        monkeypatch.setenv("HUOHUA_LOGIN_REMINDER_DAYS", "7")
+        reset_settings()
+
+        status = check_cookie_freshness(self._state_file(tmp_path, age_days=10))
+
+        assert status.expired is False
+        assert status.needs_renewal is False
+        assert "正常" in status.detail
+
+
+class TestRefreshStateMtime:
+    """跑成功 ⇒ 刷新登录态文件时间戳（让「文件年龄」= 距上次验证可用）。"""
+
+    def test_touches_the_file(self, tmp_path: Path) -> None:
+        from douyin_huohua_keeper.scheduler import runner as runner_mod
+
+        path = tmp_path / "main.state.json"
+        path.write_text("{}", encoding="utf-8")
+        old = time.time() - 10 * 86400
+        os.utime(path, (old, old))
+
+        runner_mod._refresh_state_mtime(path)
+
+        assert time.time() - path.stat().st_mtime < 60
+
+    def test_missing_file_is_not_created(self, tmp_path: Path) -> None:
+        """没有登录态文件时不能凭空造一个空的 —— 只当无事发生。"""
+        from douyin_huohua_keeper.scheduler import runner as runner_mod
+
+        missing = tmp_path / "nope.json"
+        runner_mod._refresh_state_mtime(missing)
+
+        assert not missing.exists()

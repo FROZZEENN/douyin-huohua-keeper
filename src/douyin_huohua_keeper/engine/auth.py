@@ -42,6 +42,22 @@ CONSERVATIVE_LIFETIME_DAYS = 7.0
 RENEW_REMINDER_DAYS = 3.0
 
 
+def session_limits() -> tuple[float, float]:
+    """返回 ``(寿命天数, 提醒天数)`` —— 优先读配置，读不到就用模块默认值。
+
+    ⚠️ 读配置失败时**回退默认值而不是抛异常**：登录态提醒只是个提示，
+    不能因为配置模块出问题就让整个检查炸掉。
+    """
+    try:
+        from ..config import load_settings
+
+        login = load_settings().login
+        return login.lifetime_days, login.reminder_days
+    except Exception as exc:  # noqa: BLE001 —— 见上面说明，这里刻意兜住一切
+        LOGGER.debug("读取登录态寿命配置失败，用默认值：%s", exc)
+        return CONSERVATIVE_LIFETIME_DAYS, RENEW_REMINDER_DAYS
+
+
 @dataclass(frozen=True, slots=True)
 class CookieStatus:
     """本地登录态的时效性判断结果。"""
@@ -130,8 +146,14 @@ def check_cookie_freshness(state_path: Path) -> CookieStatus:
 
     expires_at, expires_in_days = _cookie_expiry(session)
 
-    # 文件年龄换算成「剩余天数」：假设 cookie 有 CONSERVATIVE_LIFETIME_DAYS 的寿命
-    remaining_by_age = CONSERVATIVE_LIFETIME_DAYS - file_age_days
+    # 文件年龄换算成「剩余天数」：假设 cookie 有 lifetime_days 的寿命。
+    #
+    # ⚠️ 这里的「文件年龄」实际是**距上次验证登录态可用过了多久** ——
+    #    因为每次发送成功都会刷新文件时间戳（见 scheduler/runner.py 的 _refresh_state_mtime）。
+    #    所以正常使用（每天都有跑成功）时它恒为 0，不会被误判过期；
+    #    只有连着好几天没跑成/没成功，年龄才会涨上来提醒你。
+    lifetime_days, reminder_days = session_limits()
+    remaining_by_age = lifetime_days - file_age_days
 
     candidates = [remaining_by_age]
     if expires_in_days is not None:
@@ -139,7 +161,7 @@ def check_cookie_freshness(state_path: Path) -> CookieStatus:
     remaining = min(candidates)
 
     expired = remaining <= 0
-    needs_renewal = remaining <= RENEW_REMINDER_DAYS
+    needs_renewal = remaining <= reminder_days
 
     if expired:
         detail = f"登录态已过期（约 {abs(remaining):.0f} 天前失效），需要重新扫码"
