@@ -31,7 +31,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from ..models import Contact, Message, RunReport, RunStatus, Schedule, SendInterval
+from ..models import Contact, FailureKind, Message, RunReport, RunStatus, Schedule, SendInterval
 from .atomic import atomic_write_json, cleanup_stale_temp_files, read_json
 from .lock import FileLock
 
@@ -631,6 +631,13 @@ class Repository:
         #    （策略见 scheduler/jobs.py 的 _send_daily_digest）。
         entry["any_failed"] = bool(entry.get("any_failed")) or bool(report.failed)
         entry["any_uncertain"] = bool(entry.get("any_uncertain")) or bool(entry["last_uncertain"])
+
+        # 「今天有没有因为登录态失效而全军覆没」—— 23:30 的汇总用它把话说准：
+        # 是「登录态过期」还是「发送结果没确认到」，两者要分开说。
+        auth_failed = any(
+            o.failure_kind is FailureKind.AUTH for o in report.outcomes if o.status is RunStatus.FAILED
+        )
+        entry["any_auth"] = bool(entry.get("any_auth")) or bool(auth_failed)
 
         days[day_key] = entry
         payload["updated_at"] = now_str()

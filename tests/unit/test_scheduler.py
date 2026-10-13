@@ -583,6 +583,22 @@ class TestDailyDigest:
         assert alert is not None
         assert "失败" in alert.body
 
+    def test_digest_mentions_login_expiry(self, monkeypatch: Any) -> None:
+        """登录态失效过的日子，汇总要把这件事说出来 —— 和「结果不确定」分开说。"""
+        alert = self._capture_alert(
+            monkeypatch,
+            {
+                "success": False,
+                "attempts": 1,
+                "any_auth": True,
+                "last_summary": "成功 0/3，失败 3",
+            },
+        )
+
+        assert alert is not None
+        assert "登录态" in alert.body
+        assert "重新扫码" in alert.body
+
     def test_digest_reports_missed_day(self, monkeypatch: Any) -> None:
         """今天压根没跑（定时任务没执行）→ 这是异常，必须推。"""
         alert = self._capture_alert(monkeypatch, {"success": False, "attempts": 0})

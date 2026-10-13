@@ -12,7 +12,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from douyin_huohua_keeper.models import AlertLevel
+from douyin_huohua_keeper.models import AlertLevel, FailureKind, RunReport, RunStatus, TargetOutcome
 from douyin_huohua_keeper.notify.channels import (
     BarkChannel,
     Channel,
@@ -422,3 +422,90 @@ class TestTestNotification:
         assert level is AlertLevel.WARNING
         assert "测试" in title
         assert "配置正确" in body
+
+
+class TestAlertTexts:
+    """通知文案必须能一眼分清三件事：登录态失效 / 发送失败 / 结果无法确认。
+
+    背景：用户明确要求 —— 登录态真失效时推送要写「登录态已过期」，
+    不能含糊成「有人发送结果不确定」，而且两者绝不能混。
+    """
+
+    def _report(self, statuses: list[RunStatus], *, failed_kind: FailureKind | None = None) -> RunReport:
+        outcomes = tuple(
+            TargetOutcome(
+                name=f"好友{i}",
+                status=status,
+                failure_kind=failed_kind if status is RunStatus.FAILED else None,
+                detail="测试用",
+            )
+            for i, status in enumerate(statuses, 1)
+        )
+        return RunReport(
+            run_id="20260101-000000-test",
+            account_id="main",
+            started_at="2026-01-01T00:00:00",
+            finished_at="2026-01-01T00:00:10",
+            dry_run=False,
+            outcomes=outcomes,
+        )
+
+    def _craft(self, report: RunReport, **kwargs):
+        from douyin_huohua_keeper.scheduler.runner import _craft_alert_text
+
+        params = {
+            "report": report,
+            "level": AlertLevel.NOTICE,
+            "abort_reason": None,
+            "auth_expired": False,
+            "risk_detected": False,
+        }
+        params.update(kwargs)
+        return _craft_alert_text(**params)
+
+    def test_auth_expired_says_so_explicitly(self) -> None:
+        title, body = self._craft(
+            self._report([RunStatus.FAILED] * 3, failed_kind=FailureKind.AUTH),
+            auth_expired=True,
+            abort_reason="登录态已过期（约 1 天前失效），需要重新扫码",
+            failed_now=3,
+        )
+
+        assert "登录态已过期" in title
+        assert "重新扫码" in title
+        # 必须和「无法确认」划清界限
+        assert "无法确认" in body
+
+    def test_all_failed_points_at_login_first(self) -> None:
+        """一个都没成功：标题要说清严重性，正文把登录态放在第一个排查项。"""
+        title, body = self._craft(
+            self._report([RunStatus.FAILED] * 5, failed_kind=FailureKind.TRANSIENT),
+            failed_now=5,
+        )
+
+        assert "一个都没发出去" in title
+        assert "登录态" in body
+        assert "立即发送一次" in body
+
+    def test_uncertain_only_is_not_described_as_failure(self) -> None:
+        """只有「无法确认」时，绝不能让人以为是发送失败或登录态问题。"""
+        title, body = self._craft(
+            self._report([RunStatus.SUCCESS, RunStatus.SUCCESS, RunStatus.UNCERTAIN, RunStatus.UNCERTAIN]),
+            uncertain_now=2,
+            failed_now=0,
+        )
+
+        assert "无法确认" in title
+        assert "这不是发送失败" in body
+        assert "不代表登录态失效" in body
+        # 不能出现「失败」这种会吓人的措辞当标题
+        assert "没发出去" not in title
+
+    def test_partial_failure_lists_who_failed(self) -> None:
+        title, body = self._craft(
+            self._report([RunStatus.SUCCESS, RunStatus.FAILED, RunStatus.FAILED]),
+            failed_now=2,
+        )
+
+        assert "2 人没发出去" in title
+        assert "好友2" in body and "好友3" in body

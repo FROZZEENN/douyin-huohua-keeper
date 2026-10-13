@@ -471,7 +471,9 @@ def _send_daily_digest(settings: Settings, repo: Any) -> None:
     if entry.get("any_failed"):
         problems.append("有发送失败")
     if entry.get("any_uncertain"):
-        problems.append("有结果不确定的发送")
+        problems.append("有结果不确定的发送（消息可能已发出，未必是失败）")
+    if entry.get("any_auth"):
+        problems.append("登录态失效过，需要重新扫码")
 
     if not problems:
         LOGGER.info("每日汇总：今天一切正常（%s），按策略不推送", last)
