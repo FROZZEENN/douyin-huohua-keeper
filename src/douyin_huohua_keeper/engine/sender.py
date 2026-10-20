@@ -236,10 +236,13 @@ class Engine:
             # 「可能原因是会话列表未加载完」）。
             #
             # 所以判成 TRANSIENT：真正改名的多花两次重试，远小于「白丢一天」的代价。
-            failure_kind=FailureKind.TRANSIENT,
-            detail=str(exc),
-            elapsed_seconds=_time.monotonic() - started,
-        )
+            return SendOutcome(
+                contact_name=contact.name,
+                status=RunStatus.FAILED,
+                failure_kind=FailureKind.TRANSIENT,
+                detail=str(exc),
+                elapsed_seconds=_time.monotonic() - started,
+            )
         except navigator.ConversationOpenError as exc:
             return SendOutcome(
                 contact_name=contact.name,
