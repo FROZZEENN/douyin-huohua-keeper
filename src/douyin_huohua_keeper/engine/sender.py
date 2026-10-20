@@ -224,13 +224,22 @@ class Engine:
                 lambda ctx: navigator.locate_conversation(ctx.page, contact.name, allow_search=allow_search)
             )
         except navigator.ContactNotFoundError as exc:
-            return SendOutcome(
-                contact_name=contact.name,
-                status=RunStatus.FAILED,
-                failure_kind=FailureKind.PERMANENT,
-                detail=str(exc),
-                elapsed_seconds=_time.monotonic() - started,
-            )
+            # ⚠️ 这里**不能**判成 PERMANENT。
+            #
+            # 「找不到」有两种完全不同的原因：
+            #   1. 对方改了昵称 → 确实要人处理（但多试一两次只是几十秒的成本）；
+            #   2. **会话列表没加载完 / 虚拟列表滚动没到位 / 搜索没出结果** → 纯偶发，
+            #      重试一次就能找到。
+            #
+            # 实测踩过：2026-10-20 有个联系人名字根本没改，只是当天偶发没定位到，
+            # 却被判成 PERMANENT 直接不重试 —— 白丢一天火花（这个错误信息自己都写着
+            # 「可能原因是会话列表未加载完」）。
+            #
+            # 所以判成 TRANSIENT：真正改名的多花两次重试，远小于「白丢一天」的代价。
+            failure_kind=FailureKind.TRANSIENT,
+            detail=str(exc),
+            elapsed_seconds=_time.monotonic() - started,
+        )
         except navigator.ConversationOpenError as exc:
             return SendOutcome(
                 contact_name=contact.name,
