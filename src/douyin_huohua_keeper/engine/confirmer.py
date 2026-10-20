@@ -72,6 +72,43 @@ class ConfirmOutcome:
         return self.state is ConfirmState.CONFIRMED
 
 
+# 确认前把消息区滚到底。
+#
+# 为什么：消息区是虚拟列表，窗口可能停在中段 —— 那样**新发出的气泡根本没渲染**，
+# 读到的是旧内容，于是「什么都没变」→ 误报「不确定」（间歇性，事后复现不了）。
+# 滚到底只是 UI 动作，没有副作用；万一页面结构变了，异常会被吞掉，不影响判定。
+_SCROLL_AREA_TO_BOTTOM_JS = """
+  () => {
+    const boxes = Array.from(document.querySelectorAll('[class*="MessageList"], [data-e2e="message-list"]'))
+      .filter((el) => (el.innerText || '').trim().length > 0);
+    if (!boxes.length) return false;
+    let best = boxes[0];
+    let bestLen = -1;
+    for (const box of boxes) {
+      const len = (box.innerText || '').length;
+      if (len > bestLen) { bestLen = len; best = box; }
+    }
+    // 自己可滚就滚自己；否则往上找最近的可滚祖先
+    let node = best;
+    for (let i = 0; i < 4 && node; i += 1) {
+      if (node.scrollHeight > node.clientHeight + 8) {
+        node.scrollTop = node.scrollHeight;
+      }
+      node = node.parentElement;
+    }
+    return true;
+  }
+"""
+
+
+def _scroll_message_area_to_bottom(page: Any) -> None:
+    """把消息区滚到底（失败只记日志，绝不影响判定）。"""
+    try:
+        page.evaluate(_SCROLL_AREA_TO_BOTTOM_JS)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug("滚动消息区失败（不影响判定）：%s", exc)
+
+
 @dataclass(frozen=True, slots=True)
 class MessageArea:
     """消息区的一次观测（只用于前后对比，绝不看绝对值）。"""
@@ -183,6 +220,12 @@ def confirm_sent(
     except Exception as exc:  # noqa: BLE001
         LOGGER.debug("把会话列表滚回顶部失败（不影响判定）：%s", exc)
 
+    # 消息区也滚到底：虚拟列表停在中段时，新气泡没渲染 → 读到旧内容 → 误报「不确定」。
+    _scroll_message_area_to_bottom(page)
+
+    # 最后一次读到的消息区形状 —— 出问题时写进说明里，用于事后定位。
+    last_area = base.area
+
     while time.monotonic() < deadline:
         entry = None
         try:
@@ -209,7 +252,9 @@ def confirm_sent(
 
         # 证据零（专治「恒定文案 + 会话已在首位 + 虚拟列表挤占」）：
         # 消息区最后一行正是我们发的内容，且消息区确实变了。
-        area_gained = _area_gained_our_message(base.area, _read_message_area(page), expected_text)
+        area_now = _read_message_area(page)
+        last_area = area_now
+        area_gained = _area_gained_our_message(base.area, area_now, expected_text)
 
         # 证据一（与预览无关、恒定文案也能用）：
         # 消息区里「正好是这条内容」的行数变多了 → 确实新增了一条气泡。
@@ -259,7 +304,10 @@ def confirm_sent(
     diag = (
         f"（本次可用判据：消息区={'可读' if base.area.usable else '没读到'}"
         f"/{base.area.lines}行、needle={base.needle_count}、"
-        f"预览={'匹配' if _preview_matches(base.preview, expected) else '不匹配'}）"
+        f"预览={'匹配' if _preview_matches(base.preview, expected) else '不匹配'}；"
+        f"发送前开头={_abbrev_head(base.area.head)}、"
+        f"末次开头={_abbrev_head(last_area.head)}"
+        f"、指纹={'变了' if last_area.fingerprint != base.area.fingerprint else '没变'}）"
     )
 
     # 超时了。三种情况分开说清楚，因为「该不该重试」完全不同。
@@ -495,6 +543,13 @@ def _read_message_area(page: Any) -> MessageArea:
 #   群聊：发送后 ['1',    '刚刚', '嘿嘿', '1' …] → 我们的内容在索引 0（群聊里自己的消息不带昵称行）
 # 取 2 行是为了安全：对方回消息时（群聊里昵称 + 内容占 2 行）我们的内容会被挤到索引 2 之外。
 _AREA_HEAD_LINES = 2
+
+
+def _abbrev_head(head: tuple[str, ...], *, limit: int = 2, width: int = 18) -> str:
+    """把消息区开头几行缩成一行人话，用于报告里的自诊断（太长会刷屏）。"""
+    if not head:
+        return "（空）"
+    return " / ".join(repr(x[:width]) for x in head[:limit])
 
 
 def _area_gained_our_message(base: MessageArea, now: MessageArea, expected: str) -> bool:
