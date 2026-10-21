@@ -158,6 +158,99 @@ def run_once(
 # =============================================================================
 
 
+def _detect_suspected_renames(
+    *, configured: set[str], missing: list[str], seen: set[str]
+) -> tuple[str, str] | None:
+    """用「找不到的人 + 列表里陌生的名字」推断疑似改名。
+
+    为什么只能"推断"：配置里只存名字（``conversation_id`` 是 null），好友改名后
+    我们只知道「原来那个名字找不到了」，**拿不到新昵称**。但会话列表是能读全的 ——
+    列表里出现一个配置里没有的名字，就很可能是它。
+
+    - 1 个缺失 + 1 个陌生名 → 直接给出配对，可信度高；
+    - 其它情况 → 把两组都列出来，让人自己确认（不硬猜）。
+
+    返回 ``(去重键, 给人看的正文)``；没有值得提醒的线索时返回 ``None``。
+    """
+    # 惰性导入：避免 runner ↔ engine 的顶层循环依赖
+    from ..engine.navigator import normalize_name
+
+    known = {normalize_name(c) for c in configured}
+    unknown = sorted(n for n in seen if normalize_name(n) not in known)
+    if not missing or not unknown:
+        return None
+
+    if len(missing) == 1 and len(unknown) == 1:
+        old, new = missing[0], unknown[0]
+        key = f"{normalize_name(old)}->{normalize_name(new)}"
+        body = (
+            f"**疑似改名：{old} → {new}**\n\n"
+            f"配置里的「{old}」在会话列表里找不到了；\n"
+            f"而列表里多了一个配置里没有的名字「{new}」。\n\n"
+            "**建议动作**：如果确实是改名，去工作台把这个收件人的名字改成新昵称；"
+            "不改的话这个人每天都会发送失败。\n\n"
+            "（这条提醒对同一次改名只发一次，改好后不会再打扰。）"
+        )
+        return key, body
+
+    key = "multi:" + "|".join(normalize_name(x) for x in [*missing, *unknown][:20])
+    body = (
+        "**疑似有好友改名**（有好几个对不上，无法自动配对，需要你确认）\n\n"
+        "配置里找不到：" + "、".join(missing) + "\n"
+        "列表里的陌生名字：" + "、".join(unknown[:10]) + ("…" if len(unknown) > 10 else "") + "\n\n"
+        "**建议动作**：去工作台「收件人」页核对一下昵称，改好后就不会再失败。"
+    )
+    return key, body
+
+
+def _alert_suspected_renames(
+    settings: Settings,
+    repo: Repository,
+    engine: Any,
+    *,
+    plan: TaskPlan,
+    missing: list[str],
+) -> None:
+    """读全部会话 → 推断改名 → 去重后推送。
+
+    **任何异常都吞掉**：这是附加提醒，绝不能影响发送结果。
+    """
+    from ..engine import navigator
+    from ..store.atomic import atomic_write_json, read_json
+
+    try:
+        details = engine.session.call(
+            lambda ctx: navigator.collect_conversation_details(ctx.page), timeout=240
+        )
+        seen = {str(d.get("name") or "").strip() for d in details}
+        seen.discard("")
+        result = _detect_suspected_renames(
+            configured={c.name for c in plan.targets}, missing=missing, seen=seen
+        )
+        if result is None:
+            LOGGER.info("疑似改名检测：没有值得提醒的线索（缺失 %s，陌生名 %s）", missing, sorted(seen)[:5])
+            return
+        key, body = result
+
+        # 去重：同一次改名只提醒一次，避免每天重复打扰
+        path = repo.config_dir / "rename_alerts.json"
+        payload = read_json(path, default={}) or {}
+        alerted = payload.get("alerted") or {}
+        if key in alerted:
+            LOGGER.info("疑似改名检测：%s 已经提醒过，跳过", key)
+            return
+        alerted[key] = now_str()
+        payload["alerted"] = alerted
+        atomic_write_json(path, payload)
+
+        Dispatcher.from_settings(settings.notify).dispatch(
+            Alert(level=AlertLevel.NOTICE, title="🔄 疑似有好友改名", body=body)
+        )
+        LOGGER.warning("疑似改名，已推送提醒：%s", key)
+    except Exception as exc:  # noqa: BLE001 —— 附加提醒，绝不能影响发送结果
+        LOGGER.warning("疑似改名检测失败（不影响发送）：%s", exc)
+
+
 def _refresh_state_mtime(state_path: Any) -> None:
     """登录态被验证可用后，刷新它的文件时间戳。
 
@@ -313,6 +406,17 @@ def _execute(
             for contact in plan.targets
         ]
         LOGGER.warning("任务在给任何人发送前就中止了：%s", abort_reason)
+
+    # --- 疑似改名检测（附加提醒，任何失败都不影响发送结果）---
+    #
+    # 配置里只存名字，好友改名后只会「找不到」、拿不到新昵称 ——
+    # 于是用「找不到的人 + 会话列表里陌生的名字」来推断，1 对 1 时直接给出配对。
+    # 只在真的出现「找不到联系人」时才做（否则没必要多滚一遍列表）。
+    not_found = [
+        o.name for o in outcomes if o.status is RunStatus.FAILED and "找不到联系人" in (o.detail or "")
+    ]
+    if not_found and not dry_run and engine is not None:
+        _alert_suspected_renames(settings, repo, engine, plan=plan, missing=not_found)
 
     # --- 汇总 ---
     return _finalize(

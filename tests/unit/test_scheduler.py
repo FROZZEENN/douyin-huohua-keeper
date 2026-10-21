@@ -710,3 +710,44 @@ class TestMissedDayWarning:
         jobs_mod._warn_if_today_missed(schedule, repo=repo, now=datetime(2026, 9, 19, 0, 20))
 
         assert sent == []
+
+
+class TestSuspectedRename:
+    """好友改名的推断与去重（配置里只有名字，改名后拿不到新昵称）。"""
+
+    def _detect(self, **kwargs: Any):
+        from douyin_huohua_keeper.scheduler.runner import _detect_suspected_renames
+
+        return _detect_suspected_renames(**kwargs)
+
+    def test_one_missing_one_new_gives_a_pair(self) -> None:
+        """1 对 1 时直接给配对 —— 这是最常见也确实可信的情况。"""
+        key, body = self._detect(configured={"小明", "小红"}, missing=["小明"], seen={"雪", "小红"})
+
+        assert key == "小明->雪"
+        assert "疑似改名" in body
+        assert "小明" in body and "雪" in body
+
+    def test_multiple_unknown_are_listed_not_guessed(self) -> None:
+        """对不上号时不硬猜，把两组都列出来让人确认。"""
+        key, body = self._detect(configured={"A", "B"}, missing=["A", "B"], seen={"C", "D"})
+
+        assert key.startswith("multi:")
+        assert "无法自动配对" in body
+        assert "A" in body and "C" in body
+
+    def test_no_unknown_name_means_no_alert(self) -> None:
+        """配置里的人找不到、但列表里也没有陌生名字 → 没有线索，不打扰。"""
+        # 注意 B 必须在配置里 —— 否则它自己就是「陌生名字」，会被判成 B 是 A 的新名字
+        assert self._detect(configured={"A", "B"}, missing=["A"], seen={"B"}) is None
+
+    def test_no_missing_means_no_alert(self) -> None:
+        assert self._detect(configured={"A"}, missing=[], seen={"A", "雪"}) is None
+
+    def test_dedup_key_is_stable_across_runs(self) -> None:
+        """同一次改名、每天检测 → 键必须一样，否则会天天重复推送。"""
+        first = self._detect(configured={"小明"}, missing=["小明"], seen={"雪"})
+        second = self._detect(configured={"小明"}, missing=["小明"], seen={"雪"})
+
+        assert first is not None and second is not None
+        assert first[0] == second[0]
