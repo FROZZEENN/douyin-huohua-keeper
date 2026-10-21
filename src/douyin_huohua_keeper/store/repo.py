@@ -655,6 +655,37 @@ class Repository:
             return False
         return bool(entry.get("success"))
 
+    # ------------------------------------------------------------------
+    # 「今天是否已经推送过问题提醒」
+    #
+    # 用途：Server酱 免费版**每天只有 5 条**额度（用户实测）。白天已经推过
+    # 失败/不确定提醒的日子，23:30 的汇总再推一次就是纯重复 —— 白白吃掉额度，
+    # 还可能让真正关键的那条发不出去。
+    # 所以：白天推过 → 晚上汇总跳过；白天推送失败/没推 → 晚上照常补。
+    # ------------------------------------------------------------------
+
+    @property
+    def notify_state_path(self) -> Path:
+        return self.config_dir / "notify_state.json"
+
+    def mark_problem_pushed(self, *, kind: str = "alert") -> None:
+        """记录「今天已经推送过问题提醒」。任何异常都吞掉 —— 记账失败不影响发送。"""
+        try:
+            atomic_write_json(
+                self.notify_state_path,
+                {"date": today_str(), "at": now_str(), "kind": kind},
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("记录推送状态失败（不影响发送）：%s", exc)
+
+    def problem_pushed_today(self) -> bool:
+        """今天是否已经推送过问题提醒。读不到就当没推过（宁可多推一条，也不漏）。"""
+        try:
+            payload = read_json(self.notify_state_path, default={}) or {}
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(payload.get("date") == today_str())
+
     def daily_entry(self, on: str | None = None) -> dict[str, Any] | None:
         day_key = on or today_str()
         payload = read_json(self.daily_index_path, default=None)

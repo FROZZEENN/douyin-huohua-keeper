@@ -509,7 +509,7 @@ class TestDailyDigest:
 
         assert nxt > datetime.now(TZ)
 
-    def _capture_alert(self, monkeypatch: Any, entry: dict[str, Any]) -> Any:
+    def _capture_alert(self, monkeypatch: Any, entry: dict[str, Any], *, pushed: bool = False) -> Any:
         from douyin_huohua_keeper import notify as notify_pkg
 
         captured: dict[str, Any] = {}
@@ -525,7 +525,7 @@ class TestDailyDigest:
 
         monkeypatch.setattr(notify_pkg, "Dispatcher", FakeDispatcher)
         settings = load_settings()
-        jobs_mod._send_daily_digest(settings, _FakeDigestRepo(entry))
+        jobs_mod._send_daily_digest(settings, _FakeDigestRepo(entry, pushed=pushed))
         # 按策略静默时不会派发 —— 此时返回 None，由用例断言
         return captured.get("alert")
 
@@ -583,6 +583,34 @@ class TestDailyDigest:
         assert alert is not None
         assert "失败" in alert.body
 
+    def test_digest_is_skipped_when_day_already_pushed(self, monkeypatch: Any) -> None:
+        """白天已经推过问题提醒 → 晚上不再重复推。
+
+        用户要求：他只有 Server酱 免费版 5 条/天，重复推汇总会白吃额度。
+        """
+        alert = self._capture_alert(
+            monkeypatch,
+            {
+                "success": False,
+                "attempts": 1,
+                "any_auth": True,
+                "last_summary": "成功 0/3，失败 3",
+            },
+            pushed=True,
+        )
+
+        assert alert is None
+
+    def test_digest_still_pushes_when_day_not_pushed(self, monkeypatch: Any) -> None:
+        """白天没推成（推送失败/没推）→ 晚上必须照常补推，不能漏。"""
+        alert = self._capture_alert(
+            monkeypatch,
+            {"success": False, "attempts": 1, "last_summary": "成功 0/3，失败 3"},
+            pushed=False,
+        )
+
+        assert alert is not None
+
     def test_digest_mentions_login_expiry(self, monkeypatch: Any) -> None:
         """登录态失效过的日子，汇总要把这件事说出来 —— 和「结果不确定」分开说。"""
         alert = self._capture_alert(
@@ -610,11 +638,16 @@ class TestDailyDigest:
 class _FakeDigestRepo:
     """``_send_daily_digest`` 只用到这两个方法。"""
 
-    def __init__(self, entry: dict[str, Any]) -> None:
+    def __init__(self, entry: dict[str, Any], *, pushed: bool = False) -> None:
         self._entry = entry
+        self._pushed = pushed
 
     def daily_entry(self, on: str | None = None) -> dict[str, Any]:
         return self._entry
+
+    def problem_pushed_today(self) -> bool:
+        """今天白天是否已经推送过问题提醒（决定晚上要不要再推）。"""
+        return self._pushed
 
     def load_schedule(self) -> Schedule:
         return Schedule(enabled=True, hour=9, minute=30, jitter_minutes=0)

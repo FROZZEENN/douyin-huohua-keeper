@@ -314,6 +314,12 @@ def _notify_scheduled_not_run(reason: str) -> None:
         )
         result = dispatcher.dispatch(alert)
         LOGGER.info("「未执行」通知结果：%s", result.summary())
+        # 记一笔：晚上汇总不用再重复说一遍
+        try:
+            target_repo = repository_for(settings)
+            target_repo.mark_problem_pushed(kind="missed")
+        except Exception as exc:  # noqa: BLE001 —— 记账失败不影响通知
+            LOGGER.debug("记录「未执行」推送状态失败：%s", exc)
     except Exception:
         LOGGER.exception("发送「未执行」通知失败")
 
@@ -477,6 +483,16 @@ def _send_daily_digest(settings: Settings, repo: Any) -> None:
 
     if not problems:
         LOGGER.info("每日汇总：今天一切正常（%s），按策略不推送", last)
+        return
+
+    # ⚠️ 白天已经推过问题提醒 → 晚上不再重复推。
+    #
+    # 为什么：Server酱 免费版**每天只有 5 条**额度（用户实测）。一个「糟一点的日子」
+    # 可能产生 失败提醒 + 改名提醒 + 被跳过提醒 + 汇总 = 4~5 条，
+    # 重复推汇总会把额度耗光，反而让真正关键的那条发不出去。
+    # 注意：只有**推送成功**才会留下标记 —— 白天推送失败/没推成，晚上仍然照常补发。
+    if repo.problem_pushed_today():
+        LOGGER.info("每日汇总跳过：今天白天已经推送过问题提醒，不重复占用推送额度")
         return
 
     problems_line = "⚠️ 今天有情况：" + "；".join(problems) + "\n\n"

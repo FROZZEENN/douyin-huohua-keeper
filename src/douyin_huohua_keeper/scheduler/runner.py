@@ -702,6 +702,8 @@ def _dispatch_alert(
 
     dispatch_report = dispatcher.dispatch(alert)
     LOGGER.info("告警分发结果：%s", dispatch_report.summary())
+    # 白天推过问题提醒 → 23:30 汇总不再重复推（省 Server酱 额度）
+    _remember_problem_pushed(settings, kind="alert")
 
 
 def _craft_alert_text(
@@ -862,6 +864,18 @@ def _craft_notice_text(
 # =============================================================================
 
 
+def _remember_problem_pushed(settings: Settings, *, kind: str) -> None:
+    """推送成功后记一笔，供 23:30 汇总判断是否重复推送。
+
+    背景：Server酱 免费版**每天只有 5 条**额度。白天已经推过失败/不确定提醒的日子，
+    晚上再推一条汇总就是纯重复，白白吃掉额度。记这一笔之后，汇总会主动跳过。
+    """
+    try:
+        repository_for(settings).mark_problem_pushed(kind=kind)
+    except Exception as exc:  # noqa: BLE001 —— 记账失败不影响发送
+        LOGGER.debug("记录推送状态失败：%s", exc)
+
+
 def _notify_skipped_by_lock(settings: Settings) -> None:
     """定时任务因为「已有任务在运行」被跳过时，**必须推送**。
 
@@ -886,6 +900,7 @@ def _notify_skipped_by_lock(settings: Settings) -> None:
             )
         )
         LOGGER.warning("定时任务被锁跳过，已推送提醒")
+        _remember_problem_pushed(settings, kind="skipped")
     except Exception as exc:  # noqa: BLE001 —— 通知失败不能反过来影响任务
         LOGGER.warning("推送「定时任务被跳过」失败：%s", exc)
 

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -412,3 +413,34 @@ class TestRunLock:
 def _today_of_report() -> str:
     """报告里的完成时间是硬编码的 2026-09-14，测试要按它判断。"""
     return "2026-09-14"
+
+
+class TestNotifyState:
+    """「今天是否已推送过问题提醒」的记账（决定 23:30 汇总要不要重复推）。"""
+
+    def test_mark_then_read_true(self, tmp_path: Path) -> None:
+        repo = Repository(tmp_path)
+        repo.ensure_layout()
+
+        assert repo.problem_pushed_today() is False
+
+        repo.mark_problem_pushed(kind="alert")
+
+        assert repo.problem_pushed_today() is True
+
+    def test_other_day_is_not_today(self, tmp_path: Path) -> None:
+        """记的是昨天 → 今天不该被当成「已推过」（否则第二天会漏推）。"""
+        repo = Repository(tmp_path)
+        repo.ensure_layout()
+        with open(repo.notify_state_path, "w", encoding="utf-8") as fh:
+            json.dump({"date": "2000-01-01", "at": "2000-01-01T09:30:00"}, fh)
+
+        assert repo.problem_pushed_today() is False
+
+    def test_corrupt_file_falls_back_to_false(self, tmp_path: Path) -> None:
+        """文件坏了 → 当作没推过（宁可多推一条，也不漏）。"""
+        repo = Repository(tmp_path)
+        repo.ensure_layout()
+        repo.notify_state_path.write_text("{broken", encoding="utf-8")
+
+        assert repo.problem_pushed_today() is False
