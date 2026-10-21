@@ -37,7 +37,13 @@ from .navigator import normalize_name, read_conversation_list, scroll_conversati
 LOGGER = logging.getLogger(__name__)
 
 # 默认超时（毫秒），来自配置但这里给个兜底
-DEFAULT_CONFIRM_TIMEOUT_MS = 15_000
+# 确认窗口。
+#
+# ⚠️ 2026-10-21 实测：有的会话**消息区更新很慢** —— 报告里的现场数据显示
+#    「发送前开头=昨天的时间戳 / 末次开头='刚刚','1'、指纹=变了」，即证据**确实出现了**，
+#    但出现在 14~16 秒，正好卡在 15 秒窗口的边缘，凑不够「连续 2 次确认」→ 误报「不确定」。
+#    放宽到 25 秒：证据出现了就有足够时间被连续观测到。
+DEFAULT_CONFIRM_TIMEOUT_MS = 25_000
 
 # 轮询间隔（秒）
 POLL_INTERVAL_SEC = 0.4
