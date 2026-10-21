@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from douyin_huohua_keeper.store.lock import (
+    HEARTBEAT_STALE_SECONDS,
     FileLock,
     LockBusyError,
     read_lock_holder,
@@ -211,3 +212,73 @@ class TestAgeTracking:
             second = lock.age_seconds()
             assert second is not None
             assert second > first
+
+
+class TestHeartbeat:
+    """心跳：区分「同一 pid 的新进程」与「真的在跑」。
+
+    2026-10-21 真实事故：容器里 PID 会重用（重启后主进程又是 pid 6），
+    崩溃留下的残留锁被 pid 存活检查判成「还活着」，于是之后所有运行都被挡掉、
+    定时任务只留一行 WARNING 就跳过。心跳就是用来破这个局的。
+    """
+
+    def _write_lock(self, path: Path, *, pid: int, heartbeat_age: float) -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "pid": pid,
+                    "acquired_at": "2026-01-01T00:00:00",
+                    "acquired_ts": time.time() - 3600,
+                    "heartbeat_ts": time.time() - heartbeat_age,
+                },
+                fh,
+            )
+
+    def test_stale_heartbeat_with_live_pid_is_reclaimed(self, tmp_path: Path) -> None:
+        """**核心用例**：pid 还活着（就是本进程），但心跳早停了 → 必须判残留。
+
+        这正是容器 PID 重用的场景 —— 以前只看 pid，所以永远清不掉。
+        """
+        path = tmp_path / ".run.lock"
+        self._write_lock(path, pid=os.getpid(), heartbeat_age=HEARTBEAT_STALE_SECONDS + 60)
+
+        lock = FileLock(path)
+        lock.acquire()  # 不抛 LockBusyError 就说明成功夺锁
+        try:
+            assert path.exists()
+        finally:
+            lock.release()
+
+    def test_fresh_heartbeat_is_not_reclaimed(self, tmp_path: Path) -> None:
+        """心跳还在刷 → 哪怕跑很久也绝不夺锁（防止两个任务并跑）。"""
+        path = tmp_path / ".run.lock"
+        self._write_lock(path, pid=os.getpid(), heartbeat_age=5)
+
+        with pytest.raises(LockBusyError):
+            FileLock(path).acquire()
+
+    def test_dead_pid_is_reclaimed(self, tmp_path: Path) -> None:
+        """pid 已经不存在 → 正常清理（原有行为不能被破坏）。"""
+        path = tmp_path / ".run.lock"
+        self._write_lock(path, pid=999_999_999, heartbeat_age=1)
+
+        lock = FileLock(path)
+        lock.acquire()
+        lock.release()
+
+    def test_touch_keeps_heartbeat_fresh(self, tmp_path: Path) -> None:
+        path = tmp_path / ".run.lock"
+        lock = FileLock(path)
+        lock.acquire()
+        try:
+            with open(path, encoding="utf-8") as fh:
+                first = json.load(fh).get("heartbeat_ts")
+            time.sleep(0.05)
+            lock.touch()
+            with open(path, encoding="utf-8") as fh:
+                second = json.load(fh).get("heartbeat_ts")
+
+            assert second is not None and first is not None
+            assert second > first
+        finally:
+            lock.release()

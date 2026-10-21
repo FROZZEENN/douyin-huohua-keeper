@@ -97,6 +97,13 @@ class BrowserSession:
         # 正在排队/执行的调用数。外部（比如工作台的空闲回收）靠它判断
         # 「现在能不能安全地 stop」—— 操作进行中 stop 会打断那次调用。
         self._pending = 0
+        # 「卡死」标记：有一次调用超时后置位。
+        #
+        # ⚠️ 2026-10-21 真实事故：call() 超时只是**放弃等待**，卡住的 fn 仍然占着
+        #    浏览器线程。后续每次 call 都排在同一队列后面 —— 于是整体「卡 8 分钟」，
+        #    日志里却只有一行「等 2 秒后把列表重扫一遍」。置位后后续调用立即失败，
+        #    让上层快速收尾，而不是继续排队。
+        self._stuck = False
 
     @property
     def busy(self) -> bool:
@@ -112,6 +119,8 @@ class BrowserSession:
         「Chromium 没装」，而那个错误信息（"Executable doesn't exist"）
         对用户来说是唯一有用的线索。
         """
+        self._stuck = False
+
         if self._thread is not None and self._thread.is_alive():
             if self._context is None:
                 raise BrowserError("浏览器正在启动中")
@@ -167,6 +176,12 @@ class BrowserSession:
         ``fn`` 里可以做任何 Playwright 操作，但不该做耗时过长的网络等待 ——
         那会让工作台的其他操作排队。长操作请拆成多步。
         """
+        if self._stuck:
+            raise BrowserError(
+                "浏览器已判定卡死（上一次操作超时，任务仍占用着浏览器线程）—— "
+                "本轮剩余操作直接失败，请重试；反复出现请看 logs/huohua.log"
+            )
+
         context = self._context
         if context is None or self._thread is None or not self._thread.is_alive():
             raise BrowserNotStartedError("浏览器未启动，请先调用 start()")
@@ -187,11 +202,22 @@ class BrowserSession:
             try:
                 return future.result(timeout=wait_seconds)
             except TimeoutError as exc:
+                # 超时只是放弃等待 —— 卡住的 fn 还占着浏览器线程。
+                # 置位让后续调用快速失败，并在后台尽力收尾（join 有超时，不会一直等）。
+                self._stuck = True
+                threading.Thread(target=self._safe_stop, daemon=True).start()
                 raise BrowserError(f"浏览器操作超时（{wait_seconds:.0f}s）") from exc
         finally:
             self._pending -= 1
 
     # --- 内部 ---------------------------------------------------------------
+
+    def _safe_stop(self) -> None:
+        """后台尽力收尾；卡死时 join 超时返回，不会把调用方一起拖住。"""
+        try:
+            self.stop(timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("卡死后收尾失败：%s", exc)
 
     def _run(self) -> None:
         """浏览器线程的主体。

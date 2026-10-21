@@ -116,10 +116,17 @@ def run_once(
     is_dry_run = settings.send.dry_run if dry_run is None else dry_run
 
     # --- 1. 全局锁 ---
-    with _acquire_lock(repo) as lock_held:
+    guard = _acquire_lock(repo)
+    with guard as lock_held:
         if not lock_held:
-            # 锁被别人占着：不是一个「失败」，而是「这次跳过」
+            # 锁被别人占着：不是一个「失败」，而是「这次跳过」。
+            #
+            # ⚠️ 但**定时任务**被挡下必须让人知道（2026-10-21 事故）：
+            #    残留锁会让每天的定时发送静默跳过、只留一行日志，
+            #    用户以为在正常发，实际一整天没人收到消息。
             LOGGER.warning("已有任务在运行，本次触发跳过")
+            if kind == "scheduled":
+                _notify_skipped_by_lock(settings)
             return None
 
         # --- 2. 冻结计划 ---
@@ -150,7 +157,7 @@ def run_once(
         )
 
         # --- 3-7. 执行 ---
-        return _execute(settings, repo, plan, context, is_dry_run, kind=kind)
+        return _execute(settings, repo, plan, context, is_dry_run, kind=kind, lock=guard)
 
 
 # =============================================================================
@@ -277,6 +284,7 @@ def _execute(
     dry_run: bool,
     *,
     kind: str = "manual",
+    lock: Any = None,
 ) -> RunReport:
     from ..common import errors as err_mod
     from ..engine import Engine
@@ -357,6 +365,9 @@ def _execute(
                     err_mod.sleep_with_logging(gap, reason=f"错峰（{contact.name}）")
 
                 runstate.start_target(contact.name, index + 1)
+                # 错峰等待后立刻刷心跳：错峰最长 90s，别让锁被判成残留
+                if lock is not None:
+                    lock.touch()
                 outcome, aborted = _send_one(
                     engine=engine,  # type: ignore[arg-type]
                     contact=contact,
@@ -370,9 +381,14 @@ def _execute(
                 )
                 outcomes.append(outcome)
                 runstate.mark_outcome(outcome.status.value)
+                if lock is not None:
+                    lock.touch()
 
                 if outcome.failure_kind is FailureKind.AUTH:
                     auth_expired = True
+                # 浏览器卡死：后续每个人都会立即失败，直接中止本轮（省时间、早告警）
+                elif "浏览器已判定卡死" in (outcome.detail or ""):
+                    aborted = True
                 if outcome.failure_kind is FailureKind.RISK:
                     risk_detected = True
 
@@ -846,6 +862,34 @@ def _craft_notice_text(
 # =============================================================================
 
 
+def _notify_skipped_by_lock(settings: Settings) -> None:
+    """定时任务因为「已有任务在运行」被跳过时，**必须推送**。
+
+    ⚠️ 2026-10-21 真实事故：一次崩溃留下的残留锁让每天的定时发送静默跳过，
+    只留一行 WARNING —— 用户以为在正常发，实际一整天没人收到消息。
+    这种「什么都没发生」的失败，比报错更难发现，必须有通知。
+    """
+    try:
+        Dispatcher.from_settings(settings.notify).dispatch(
+            Alert(
+                level=AlertLevel.NOTICE,
+                title="⏭ 今天的定时发送被跳过了",
+                body=(
+                    "到点时检测到**另一个任务正在运行**，本次定时任务被跳过 —— "
+                    "所以今天可能还没人收到消息。\n\n"
+                    "**先看工作台首页的运行状态**：\n"
+                    "· 如果确实有任务在跑 → 等它跑完就行；\n"
+                    "· 如果显示没有任务在跑（比如刚才异常退出过）→ 多半是残留锁，"
+                    "在服务器上执行 `rm -f data/.run.lock`，再回首页点「立即发送一次」。\n\n"
+                    "（这个提醒每天最多一条，不会刷屏。）"
+                ),
+            )
+        )
+        LOGGER.warning("定时任务被锁跳过，已推送提醒")
+    except Exception as exc:  # noqa: BLE001 —— 通知失败不能反过来影响任务
+        LOGGER.warning("推送「定时任务被跳过」失败：%s", exc)
+
+
 class _LockGuard:
     """锁的上下文管理器，拿不到锁时返回 False 而不是抛异常。
 
@@ -864,6 +908,17 @@ class _LockGuard:
             LOGGER.warning("无法获取运行锁：%s", exc)
             return False
         return True
+
+    def touch(self) -> None:
+        """刷新锁心跳。长任务（错峰等待、多人发送）里要定期调用。
+
+        不刷新的话，超过 HEARTBEAT_STALE_SECONDS 就会被判成残留锁并被后来者夺走 ——
+        那就真的两个任务并跑了。
+        """
+        try:
+            self.lock.touch()
+        except Exception as exc:  # noqa: BLE001 —— 心跳失败绝不能影响发送
+            LOGGER.debug("刷新锁心跳失败：%s", exc)
 
     def __exit__(self, *exc_info: object) -> None:
         self.lock.release()

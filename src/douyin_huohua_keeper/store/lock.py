@@ -31,6 +31,19 @@ LOGGER = logging.getLogger(__name__)
 # 时间只是 pid 判断不适用时的兜底。
 DEFAULT_STALE_SECONDS = 900.0
 
+# 心跳过期阈值。
+#
+# ⚠️ 为什么需要心跳（2026-10-21 真实事故）：
+#    容器里 PID 会**重用** —— 重启后主进程又是 pid 6。于是崩溃留下的残留锁
+#    （pid=6）会被 `_pid_alive(6)` 判成「还活着」，导致之后**所有**运行都被挡掉，
+#    连定时任务也只是打一行 WARNING 就跳过 —— 用户完全不知道今天没发。
+#    心跳能区分「同一个 pid 但其实是新进程」：持有者定期 touch，
+#    心跳停了就说明那把锁死了，不管 pid 是否还活着。
+#
+# 取 240 秒：正常发送时最长的心跳间隔是「错峰等待（≤90s）+ 单个联系人的确认（≤25s）」，
+# 远小于 240 秒；而崩溃后最多 4 分钟就能自动恢复。
+HEARTBEAT_STALE_SECONDS = 240.0
+
 
 class LockBusyError(RuntimeError):
     """锁被占用，且不是残留锁。"""
@@ -109,10 +122,13 @@ class FileLock:
             else:
                 raise LockBusyError(self.path, self._read_holder()) from None
 
+        now = time.time()
         payload = {
             "pid": os.getpid(),
             "acquired_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "acquired_ts": time.time(),
+            "acquired_ts": now,
+            # 心跳：持有者定期刷新，用来区分「pid 重用」与「真的在跑」
+            "heartbeat_ts": now,
         }
         try:
             os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -124,6 +140,26 @@ class FileLock:
 
         self._fd = fd
         self._acquired_at = payload["acquired_ts"]
+
+    def touch(self) -> None:
+        """刷新心跳（进程还活着、任务还在推进）。
+
+        只在「锁仍是自己那份」时刷新 —— 否则说明锁已经被判残留并被别人拿走，
+        此时绝不能覆盖别人的心跳。任何异常都吞掉：心跳失败不该影响发送。
+        """
+        if self._fd is None or self._acquired_at is None:
+            return
+        holder = self._read_holder() or {}
+        if holder.get("acquired_ts") != self._acquired_at:
+            return
+        payload = dict(holder)
+        payload["heartbeat_ts"] = time.time()
+        try:
+            os.ftruncate(self._fd, 0)
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            os.write(self._fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        except OSError as exc:
+            LOGGER.debug("刷新锁心跳失败（不影响发送）：%s", exc)
 
     def release(self) -> None:
         """释放锁。重复调用是安全的。
@@ -174,12 +210,15 @@ class FileLock:
     def _is_stale(self) -> bool:
         """判断现有锁是不是残留。
 
-        **判断顺序很关键：pid 优先，时间兜底。**
+        **判活条件：pid 存活 且 心跳新鲜** —— 缺一即视为残留。
 
-        ⚠️ 回归：以前是先判「年龄超过 stale_seconds 就直接算残留」，
-        于是**一个正常但跑得久的任务（>15 分钟）会被后来者夺锁** ——
-        两个发送任务并跑，正是这个锁要防的事。而模块开头写的也是
-        「真正的第一道防线是 pid 存活检查，时间只是兜底」，实现和说法反了。
+        ⚠️ 2026-10-21 真实事故：以前只看 pid。容器里 **PID 会重用**（重启后主进程
+        又是 pid 6），于是崩溃留下的残留锁（pid=6）被 `_pid_alive(6)` 判成「还活着」，
+        之后**所有**运行都被挡掉；定时任务也只打一行 WARNING 就跳过，用户完全不知情。
+        加心跳后，「同一个 pid 但其实是新进程」就能被识别出来。
+
+        ⚠️ 另一条历史回归：更早以前是「年龄超了就算残留」，于是跑得久的正常任务会被
+        后来者夺锁（两个任务并跑）。所以只要**心跳还在刷**，跑多久都不夺锁。
         """
         holder = self._read_holder()
 
@@ -193,15 +232,23 @@ class FileLock:
             return age > self.stale_seconds
 
         pid = holder.get("pid")
-        if isinstance(pid, int):
-            # 持有者还活着 → 不是残留，绝不夺锁（哪怕它跑很久）
-            return not _pid_alive(pid)
+        pid_alive = _pid_alive(pid) if isinstance(pid, int) else False
 
-        # 锁文件里没有 pid 信息（老版本写的）→ 退回时间判断
+        # 心跳最可靠：持有者定期 touch。停了就说明这把锁死了，不管 pid 是否还活着。
+        heartbeat = holder.get("heartbeat_ts")
+        if isinstance(heartbeat, (int, float)):
+            fresh = (time.time() - heartbeat) <= HEARTBEAT_STALE_SECONDS
+            return not (pid_alive and fresh)
+
+        # 老格式（没有心跳字段）：
+        #   pid 明确不在了 → 直接判残留（这是原来的行为，不能退化）；
+        #   pid 还活着     → 用获取时间兜底（15 分钟），避免旧版本进程把锁永远占住
+        if isinstance(pid, int) and not pid_alive:
+            return True
         ts = holder.get("acquired_ts")
         if isinstance(ts, (int, float)):
             return time.time() - ts > self.stale_seconds
-        return False
+        return True
 
     def _force_release(self) -> None:
         with contextlib.suppress(OSError):
