@@ -407,21 +407,36 @@ def _execute(
         # 无论成功/失败/异常，都结束进度记录
         runstate.finish()
 
-    # --- 一个人都没轮到就中止了 ---
-    # 这种情况（登录态失效、浏览器起不来、打开会话页报错）必须体现到报告里。
-    # 否则报告会是「成功 0/0，失败 0」，看起来像「什么都没发生」，
-    # 而实际上你今天的火花没续上 —— 这是最危险的静默失败。
-    if not outcomes and abort_reason:
-        outcomes = [
-            TargetOutcome(
-                name=contact.name,
-                status=RunStatus.FAILED,
-                failure_kind=(FailureKind.AUTH if auth_expired else FailureKind.TRANSIENT),
-                detail=f"任务在开始前中止：{abort_reason}",
+    # --- 中途终止：把「没轮到」的收件人补进报告 ---
+    #
+    # ⚠️ 2026-11-03 真实事故：给「雪」重试时浏览器卡死，整轮在第 4 个人处崩掉，
+    #    后面 10 个人一条都没发；但报告里只有 4 条 success，于是
+    #    summary 写成「成功 4/4，失败 0」，推送还告诉用户「火花已续上」。
+    #    ——「部分失败伪装成全部成功」比不推送危险得多。
+    #
+    # 所以只要 abort_reason 有值（不管是循环里 break 还是抛异常），
+    # 就要把所有**没有结果**的收件人补进报告，并标成失败（他们确实没发出去）。
+    if abort_reason:
+        covered = {o.name for o in outcomes}
+        leftover = [c for c in plan.targets if c.name not in covered]
+        if leftover:
+            started_normally = bool(outcomes)
+            prefix = "本次运行中途终止" if started_normally else "任务在开始前中止"
+            outcomes.extend(
+                TargetOutcome(
+                    name=c.name,
+                    status=RunStatus.FAILED,
+                    failure_kind=(FailureKind.AUTH if auth_expired else FailureKind.TRANSIENT),
+                    detail=f"{prefix}（{abort_reason}），这条消息没有尝试发送",
+                )
+                for c in leftover
             )
-            for contact in plan.targets
-        ]
-        LOGGER.warning("任务在给任何人发送前就中止了：%s", abort_reason)
+            LOGGER.warning(
+                "%s：%d 人未尝试发送，已写入报告（%s）",
+                prefix,
+                len(leftover),
+                "、".join(c.name for c in leftover[:10]),
+            )
 
     # --- 疑似改名检测（附加提醒，任何失败都不影响发送结果）---
     #
@@ -447,6 +462,36 @@ def _execute(
         dry_run=dry_run,
         kind=kind,
     )
+
+
+def _after_login_check_failed(outcome: Any, exc: Exception) -> tuple[TargetOutcome, bool]:
+    """「重试前顺手确认登录态」这一步抛异常时的收尾。
+
+    两种情况必须分开处理，否则要么白丢一整天、要么让十几个人逐个空转：
+
+    - **浏览器整体卡死**（``call()`` 超时后的连锁反应）→ 后续每个人都会立刻失败，
+      所以返回 ``aborted=True`` 让本轮立刻收尾；
+    - **其它偶发异常** → 只把这个人判失败，继续下一个。
+
+    返回 ``(结果, 是否应中止整个任务)``，与 :func:`_send_one` 的约定一致。
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    stuck = "卡死" in detail or "浏览器操作超时" in detail
+
+    if stuck:
+        LOGGER.error("重试前检查登录态时发现浏览器已无响应，本轮中止：%s", detail)
+        return (
+            TargetOutcome(
+                name=outcome.contact_name,
+                status=RunStatus.FAILED,
+                failure_kind=FailureKind.TRANSIENT,
+                detail=f"浏览器无响应（{detail}），本轮中止，这条消息未成功发出",
+            ),
+            True,
+        )
+
+    LOGGER.warning("重试前检查登录态失败（只影响这个人，继续其他人）：%s", detail)
+    return outcome.to_target_outcome(), False
 
 
 def _send_one(
@@ -531,9 +576,18 @@ def _send_one(
 
         err_mod.sleep_with_logging(decision.delay_seconds, reason=decision.reason)
 
-        # 重试前再确认一次登录态 —— 如果是登录失效，不用等三次重试才发现
+        # 重试前再确认一次登录态 —— 如果是登录失效，不用等三次重试才发现。
+        #
+        # ⚠️ 这一步**必须兜住异常**（2026-11-03 真实事故）：
+        #    ``session.call()`` 超时后会把浏览器标记成「卡死」，之后每次调用都立即抛错。
+        #    以前这里没包 try，于是「给某个人重试前的一次顺手检查」把整个运行抛了出去 ——
+        #    4 个人之后的所有收件人一条都没发，报告却写「成功 4/4、火花已续上」。
+        #    它只是顺手确认，失败最多影响当前这个人，绝不该终止整轮。
         if kind is FailureKind.TRANSIENT:
-            ready = engine.check_login()
+            try:
+                ready = engine.check_login()
+            except Exception as exc:  # noqa: BLE001 —— 理由见上面的注释
+                return _after_login_check_failed(result, exc)
             if ready.reason == "AUTH_EXPIRED":
                 LOGGER.error("重试前检测到登录态失效，停止重试")
                 return result.to_target_outcome(), True
