@@ -178,6 +178,12 @@ def _detect_suspected_renames(
     - 其它情况 → 把两组都列出来，让人自己确认（不硬猜）。
 
     返回 ``(去重键, 给人看的正文)``；没有值得提醒的线索时返回 ``None``。
+
+    ⚠️ **当前未接入运行流程**（2026-11-04）：它依赖``collect_conversation_details``
+    读全会话列表，而当前环境下列表一直是空的（页面显示「暂无会话」），扫不出陌生名字；
+    更早的版本还把调用放在 ``engine.stop()`` 之后，导致它**上线至今从未触发过**。
+    改名提醒现在改由「失败结果」驱动（见 ``_looks_like_renamed`` 与 ``_craft_notice_text``），
+    不依赖列表、也不会猜错人。等会话列表恢复后，这个函数可以再接回来做「新昵称配对」。
     """
     # 惰性导入：避免 runner ↔ engine 的顶层循环依赖
     from ..engine.navigator import normalize_name
@@ -208,54 +214,6 @@ def _detect_suspected_renames(
         "**建议动作**：去工作台「收件人」页核对一下昵称，改好后就不会再失败。"
     )
     return key, body
-
-
-def _alert_suspected_renames(
-    settings: Settings,
-    repo: Repository,
-    engine: Any,
-    *,
-    plan: TaskPlan,
-    missing: list[str],
-) -> None:
-    """读全部会话 → 推断改名 → 去重后推送。
-
-    **任何异常都吞掉**：这是附加提醒，绝不能影响发送结果。
-    """
-    from ..engine import navigator
-    from ..store.atomic import atomic_write_json, read_json
-
-    try:
-        details = engine.session.call(
-            lambda ctx: navigator.collect_conversation_details(ctx.page), timeout=240
-        )
-        seen = {str(d.get("name") or "").strip() for d in details}
-        seen.discard("")
-        result = _detect_suspected_renames(
-            configured={c.name for c in plan.targets}, missing=missing, seen=seen
-        )
-        if result is None:
-            LOGGER.info("疑似改名检测：没有值得提醒的线索（缺失 %s，陌生名 %s）", missing, sorted(seen)[:5])
-            return
-        key, body = result
-
-        # 去重：同一次改名只提醒一次，避免每天重复打扰
-        path = repo.config_dir / "rename_alerts.json"
-        payload = read_json(path, default={}) or {}
-        alerted = payload.get("alerted") or {}
-        if key in alerted:
-            LOGGER.info("疑似改名检测：%s 已经提醒过，跳过", key)
-            return
-        alerted[key] = now_str()
-        payload["alerted"] = alerted
-        atomic_write_json(path, payload)
-
-        Dispatcher.from_settings(settings.notify).dispatch(
-            Alert(level=AlertLevel.NOTICE, title="🔄 疑似有好友改名", body=body)
-        )
-        LOGGER.warning("疑似改名，已推送提醒：%s", key)
-    except Exception as exc:  # noqa: BLE001 —— 附加提醒，绝不能影响发送结果
-        LOGGER.warning("疑似改名检测失败（不影响发送）：%s", exc)
 
 
 def _refresh_state_mtime(state_path: Any) -> None:
@@ -437,17 +395,6 @@ def _execute(
                 len(leftover),
                 "、".join(c.name for c in leftover[:10]),
             )
-
-    # --- 疑似改名检测（附加提醒，任何失败都不影响发送结果）---
-    #
-    # 配置里只存名字，好友改名后只会「找不到」、拿不到新昵称 ——
-    # 于是用「找不到的人 + 会话列表里陌生的名字」来推断，1 对 1 时直接给出配对。
-    # 只在真的出现「找不到联系人」时才做（否则没必要多滚一遍列表）。
-    not_found = [
-        o.name for o in outcomes if o.status is RunStatus.FAILED and "找不到联系人" in (o.detail or "")
-    ]
-    if not_found and not dry_run and engine is not None:
-        _alert_suspected_renames(settings, repo, engine, plan=plan, missing=not_found)
 
     # --- 汇总 ---
     return _finalize(
@@ -825,6 +772,18 @@ def _craft_alert_text(
     )
 
 
+def _looks_like_renamed(outcome: TargetOutcome) -> bool:
+    """这条失败是不是「按名字找不到人」——最常见的原因就是对方改了昵称。
+
+    只认固定措辞（``navigator.ContactNotFoundError`` 抛出来的那句），**不做任何推断**：
+    判错会让人去改错的对象，比不提示更糟。
+
+    为什么不在这里"猜新名字"：会话列表在当前环境下是空的（页面显示「暂无会话」），
+    扫不出「陌生名字」；而且靠猜配对一旦猜错，消息就发给陌生人了 —— 这条红线不能碰。
+    """
+    return "找不到联系人" in (outcome.detail or "")
+
+
 def _craft_notice_text(
     *,
     report: RunReport,
@@ -849,11 +808,19 @@ def _craft_notice_text(
         total = len(report.outcomes)
         succeeded_now = sum(1 for o in report.outcomes if o.status is RunStatus.SUCCESS)
 
+        failed_all = [o for o in report.outcomes if o.status is RunStatus.FAILED]
+        # 把「找不到人」单独拎出来：它几乎只有一个原因 —— 对方改了昵称。
+        # 用户明确要求"谁改名了就提醒我"，而只说「N 人没发出去」等于让他自己猜类型。
+        renamed = [o for o in failed_all if _looks_like_renamed(o)]
+        other_failed = [o for o in failed_all if not _looks_like_renamed(o)]
+
         lines: list[str] = []
-        if failed_now:
-            names = [o.name for o in report.outcomes if o.status is RunStatus.FAILED]
-            shown = "、".join(names[:10]) + ("…" if len(names) > 10 else "")
-            lines.append(f"❌ 失败 {failed_now} 人：{shown}")
+        if renamed:
+            shown = "、".join(o.name for o in renamed[:10]) + ("…" if len(renamed) > 10 else "")
+            lines.append(f"🔄 疑似改名 {len(renamed)} 人：{shown}")
+        if other_failed:
+            shown = "、".join(o.name for o in other_failed[:10]) + ("…" if len(other_failed) > 10 else "")
+            lines.append(f"❌ 失败 {len(other_failed)} 人：{shown}")
         if uncertain_now:
             names = [o.name for o in report.outcomes if o.status is RunStatus.UNCERTAIN]
             shown = "、".join(names[:10]) + ("…" if len(names) > 10 else "")
@@ -868,6 +835,19 @@ def _craft_notice_text(
         #    现在明确说出「0 成功」，并把**登录态**放在第一个排查项：
         #    它是这类全灭事故里最常见的原因，而且修起来最快（扫个码 30 秒）。
         if succeeded_now == 0:
+            # 全灭但原因只是「找不到人」→ 别让人去白扫一次码。
+            # 这类全灭通常是「启用的收件人很少、刚好那个改名字了」，
+            # 把登录态放到第一个排查项会把方向带偏。
+            if renamed and not other_failed and not uncertain_now:
+                return (
+                    f"🔄 疑似有好友改名：{len(renamed)} 人（今天一个都没发出去）",
+                    detail + "\n\n**先别急着重新扫码** —— 登录态大概率没问题："
+                    "上面这些人是**按名字找不到**，最常见的原因就是对方改了昵称。\n\n"
+                    "**建议动作**：去工作台「收件人」页核对昵称，"
+                    "或者给对方设个备注、把备注名填进「收件人」"
+                    "（备注名会取代原昵称，之后对方再改名也不影响）；"
+                    "改完在「首页」点「立即发送一次」补发。",
+                )
             return (
                 f"🔴 今天一个都没发出去（0/{total}）",
                 detail + "\n\n**先查登录态**：打开工作台「账号」页看一眼 —— "
@@ -876,6 +856,22 @@ def _craft_notice_text(
                 "（可能是页面结构变化或网络问题）。\n\n"
                 "**建议动作**：排查后在工作台「首页」点「立即发送一次」手动补发"
                 "（手动发送不会被「今天已发」拦住）。",
+            )
+
+        # --- 全部失败都是「找不到人」→ 这就是改名，标题直接说清楚 ---
+        #
+        # 用户明确要求：谁改了名字就推送提醒。判据是硬事实（页面上确实找不到这个人），
+        # 不含任何推断，所以可以放心把标题写成「疑似改名」。
+        if renamed and not other_failed and not uncertain_now:
+            return (
+                f"🔄 疑似有好友改名：{len(renamed)} 人",
+                detail + "\n\n**为什么这么判断**：上面这些名字在会话列表和搜索里都找不到 —— "
+                "最常见的原因就是对方改了昵称。\n\n"
+                "**建议动作**（二选一）：\n"
+                "1. 去工作台「收件人」页，把名字改成抖音里现在显示的昵称；\n"
+                "2. **更省事**：在抖音里给对方设一个备注，再把备注名填进「收件人」—— "
+                "**备注名会取代原昵称**，是唯一能搜到的名字；设好之后对方再怎么改昵称都不影响。\n\n"
+                "改完在「首页」点「立即发送一次」补发（不会被「今天已发」拦住）。",
             )
 
         # --- 有人失败：说清楚谁没发出去 ---

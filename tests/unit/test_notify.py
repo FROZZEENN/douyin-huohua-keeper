@@ -509,3 +509,83 @@ class TestAlertTexts:
 
         assert "2 人没发出去" in title
         assert "好友2" in body and "好友3" in body
+
+
+class TestRenameAlertTexts:
+    """改名提醒：由「找不到联系人」这个硬事实驱动，不依赖会话列表。
+
+    用户明确要求：谁改了名字就推送提醒。以前的实现要去扫会话列表找「陌生名字」，
+    但当前列表一直是空的（「暂无会话」），而且调用点还在 ``engine.stop()`` 之后
+    —— 上线至今从未触发过。现在改为看失败结果，零推断、零额外依赖。
+    """
+
+    def _craft(self, pairs: list[tuple[str, RunStatus, str]], *, failed_now: int, uncertain_now: int = 0):
+        from douyin_huohua_keeper.scheduler.runner import _craft_alert_text
+
+        report = RunReport(
+            run_id="20261104-093000-test",
+            account_id="main",
+            started_at="2026-11-04T09:30:00",
+            finished_at="2026-11-04T09:31:00",
+            dry_run=False,
+            outcomes=tuple(TargetOutcome(name=n, status=s, detail=d) for n, s, d in pairs),
+        )
+        return _craft_alert_text(
+            report=report,
+            level=AlertLevel.NOTICE,
+            abort_reason=None,
+            auth_expired=False,
+            risk_detected=False,
+            failed_now=failed_now,
+            uncertain_now=uncertain_now,
+        )
+
+    def test_all_missing_is_reported_as_rename(self) -> None:
+        """全部失败都是「找不到人」→ 标题就该是改名，而不是笼统的「N 人没发出去」。"""
+        title, body = self._craft(
+            [
+                ("甲", RunStatus.SUCCESS, "已确认送达"),
+                ("YEKINDAR", RunStatus.FAILED, "找不到联系人「YEKINDAR」。\n已尝试：会话列表、搜索框"),
+                ("小年糕", RunStatus.FAILED, "找不到联系人「小年糕」。"),
+            ],
+            failed_now=2,
+        )
+
+        assert "疑似有好友改名" in title
+        assert "2 人" in title
+        assert "备注" in body, "正文要给出「设备注」这个一劳永逸的办法"
+
+    def test_mixed_failure_keeps_plain_failure_title(self) -> None:
+        """既有改名也有其它失败 → 标题仍是「没发出去」，但正文要分开列出。"""
+        title, body = self._craft(
+            [
+                ("己", RunStatus.SUCCESS, "已确认送达"),
+                ("甲", RunStatus.FAILED, "找不到联系人「甲」。"),
+                ("乙", RunStatus.FAILED, "浏览器操作超时（90s）"),
+            ],
+            failed_now=2,
+        )
+
+        assert "没发出去" in title
+        assert "疑似改名 1 人" in body
+        assert "失败 1 人" in body
+
+    def test_zero_success_still_uses_severe_title(self) -> None:
+        """一个人都没成功时，严重性优先 —— 不能被「改名」这个较温和的说法盖住。"""
+        title, _ = self._craft(
+            [("甲", RunStatus.FAILED, "找不到联系人「甲」。")],
+            failed_now=1,
+        )
+
+        assert "一个都没发出去" in title
+
+    def test_looks_like_renamed_only_matches_not_found(self) -> None:
+        from douyin_huohua_keeper.scheduler.runner import _looks_like_renamed
+
+        missing = TargetOutcome(name="a", status=RunStatus.FAILED, detail="找不到联系人「a」。")
+        timeout = TargetOutcome(name="b", status=RunStatus.FAILED, detail="浏览器操作超时（90s）")
+        empty = TargetOutcome(name="c", status=RunStatus.FAILED, detail=None)
+
+        assert _looks_like_renamed(missing) is True
+        assert _looks_like_renamed(timeout) is False
+        assert _looks_like_renamed(empty) is False
